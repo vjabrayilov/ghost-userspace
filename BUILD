@@ -408,6 +408,7 @@ cc_test(
         "@com_google_absl//absl/synchronization",
         "@com_google_googletest//:gtest_main",
     ],
+    linkopts =["-latomic"],
 )
 
 cc_binary(
