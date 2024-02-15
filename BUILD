@@ -748,6 +748,37 @@ cc_library(
 )
 
 cc_binary(
+    name="shenanigan",
+    srcs=[
+        "schedulers/shenanigan/agent_shenanigan.cc",
+    ],
+    copts=compiler_flags,
+    deps=[
+        ":agent",
+        ":shenanigan_scheduler",
+        "@com_google_absl//absl/debugging:symbolize",
+        "@com_google_absl//absl/flags:parse",
+    ],
+)
+
+cc_library(
+    name="shenanigan_scheduler",
+    srcs=[
+        "schedulers/shenanigan/shenanigan_scheduler.cc",
+        "schedulers/shenanigan/shenanigan_scheduler.h",
+    ],
+    hdrs=[
+        "schedulers/shenanigan/shenanigan_scheduler.h",
+    ],
+    copts=compiler_flags,
+    deps=[
+        ":agent",
+        "@com_google_absl//absl/strings:str_format",
+        "@com_google_absl//absl/time",
+    ],
+)
+
+cc_binary(
     name = "agent_flux",
     srcs = [
         "schedulers/flux/agent_flux.cc",
