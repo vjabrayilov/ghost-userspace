@@ -69,7 +69,8 @@ void ShenaniganScheduler::DumpState(const Cpu& agent_cpu, int flags) {
   fprintf(stderr, "\n");
 }
 
-ShenaniganScheduler::CpuState* ShenaniganScheduler::cpu_state_of(const ShenaniganTask* task) {
+ShenaniganScheduler::CpuState* ShenaniganScheduler::cpu_state_of(
+    const ShenaniganTask* task) {
   CHECK(task->cpu.valid());
   CHECK(task->oncpu());
   CpuState* cs = cpu_state(task->cpu);
@@ -89,8 +90,12 @@ void ShenaniganScheduler::TaskNew(ShenaniganTask* task, const Message& msg) {
   const Gtid gtid(payload->gtid);
   task->vm_id = gtid.tgid();
 
+  // Q: (vjabrayilov) are we sure that the task is always runnable?
+  // what to do if it's not?
   if (payload->runnable) {
     task->run_state = ShenaniganTask::RunState::kRunnable;
+    DLOG(INFO) << absl::StrFormat("TaskNew: Enqueued task %s for VM %d",
+                               gtid.describe(), task->vm_id);
     Enqueue(task);
   }
 
@@ -106,6 +111,8 @@ void ShenaniganScheduler::TaskRunnable(ShenaniganTask* task,
 
   task->run_state = ShenaniganTask::RunState::kRunnable;
   task->prio_boost = !payload->deferrable;
+  DLOG(INFO) << absl::StrFormat("TaskRunnable: Enqueued task %s for VM %d",
+   task->gtid.describe(), task->vm_id);
   Enqueue(task);
 }
 
@@ -156,6 +163,8 @@ void ShenaniganScheduler::TaskPreempted(ShenaniganTask* task,
     CHECK_EQ(cs->current, task);
     cs->current = nullptr;
     task->run_state = ShenaniganTask::RunState::kRunnable;
+    DLOG(INFO) << absl::StrFormat("TaskPreempted: Enqueued task %s for VM %d",
+                               task->gtid.describe(), task->vm_id);
     Enqueue(task);
   } else {
     CHECK(task->queued());
@@ -185,7 +194,8 @@ void ShenaniganScheduler::Unyield(ShenaniganTask* task) {
   auto it = std::find(yielding_tasks_.begin(), yielding_tasks_.end(), task);
   CHECK(it != yielding_tasks_.end());
   yielding_tasks_.erase(it);
-
+  DLOG(INFO) << absl::StrFormat("Unyield: Enqueued task %s for VM %d",
+                             task->gtid.describe(), task->vm_id);
   Enqueue(task);
 }
 
@@ -197,17 +207,19 @@ void ShenaniganScheduler::Enqueue(ShenaniganTask* task) {
   auto it = run_queues_.find(vm_id);
 
   if (it == run_queues_.end()) {
-    GHOST_DPRINT(1, stderr, "Created run queue for VM %d", vm_id);
+    // first time we encounter a vCPU from this VM, create a run queue
+    DLOG(INFO) << absl::StrFormat("Enqueue: Created run queue for VM %d", vm_id);
     run_queues_.emplace(vm_id, std::deque<ShenaniganTask*>());
+    it = run_queues_.find(vm_id);
+  }
+  
+  DLOG(INFO) << absl::StrFormat("Enqueue: Enqueued task %s for VM %d",
+   task->gtid.describe(), vm_id);
+  std::deque<ShenaniganTask*>& run_queue = it->second;
+  if (task->prio_boost || task->preempted) {
+    run_queue.push_front(task);
   } else {
-    GHOST_DPRINT(1, stderr, "Enqueued task %s for VM %d", task->gtid.describe(),
-                 vm_id);
-    std::deque<ShenaniganTask*>& run_queue = it->second;
-    if (task->prio_boost || task->preempted) {
-      run_queue.push_front(task);
-    } else {
-      run_queue.push_back(task);
-    }
+    run_queue.push_back(task);
   }
 }
 
@@ -217,8 +229,10 @@ ShenaniganTask* ShenaniganScheduler::Dequeue(pid_t vm_id) {
     return nullptr;
   }
 
-  auto run_queue = run_queues_[vm_id];
+  auto& run_queue = run_queues_[vm_id];
   ShenaniganTask* task = run_queue.front();
+  DLOG(INFO) << absl::StrFormat("Dequeue: Dequeued task %s for VM %d",
+   task->gtid.describe(), vm_id);
   CHECK_EQ(task->run_state, ShenaniganTask::RunState::kQueued);
   task->run_state = ShenaniganTask::RunState::kRunnable;
   run_queue.pop_front();
@@ -250,8 +264,8 @@ void ShenaniganScheduler::TaskIsOnCpu(ShenaniganTask* task, const Cpu& cpu) {
   CpuState* cs = cpu_state(cpu);
   CHECK_EQ(task, cs->current);
 
-  GHOST_DPRINT(3, stderr, "Task %s is on cpu %d", task->gtid.describe(),
-               cpu.id());
+  DLOG(INFO) << absl::StrFormat("Task %s is on cpu %d", task->gtid.describe(),
+   cpu.id());
 
   task->run_state = ShenaniganTask::RunState::kOnCpu;
   task->cpu = cpu;
@@ -292,30 +306,42 @@ void ShenaniganScheduler::GlobalSchedule(const StatusWord& agent_sw,
         cores_per_vm_.try_emplace(vm_id, topology()->EmptyCpuList());
 
     if (created) {
-      GHOST_DPRINT(1, stderr, "Created empty core list for VM %d", vm_id);
+      DLOG(INFO) << absl::StrFormat(
+          "GlobalScheduler: Created empty core list for VM %d", vm_id);
     }
 
     CpuList& cores = iter->second;
 
     if (run_queue.empty()) {
-      GHOST_DPRINT(1, stderr, "No tasks for VM %d, parking all cores assigned.",
-                   vm_id);
-      cores = topology()->EmptyCpuList();
+      if (!cores.Empty()) {
+        DLOG(INFO) << absl::StrFormat(
+        "GlobalScheduler: No tasks for VM %d, parking all cores assigned.",
+        vm_id);
+        cores = topology()->EmptyCpuList();
+      }
     } else {
       // runnable vCPUs
       if (cores.Empty()) {
-        // assign single core to this VM
+        // assign any empty core to this VM
         // TODO: (vjabrayilov) This is a temporary solution.
         // We need to implement algorithm to assign cores considering vCPU count
         // and current runnable vCPUs
         const Cpu& next_cpu = available.Front();
+        CHECK_NE(next_cpu.id(), global_cpu_id);
         cores.Set(next_cpu);
         available.Clear(next_cpu);
-        GHOST_DPRINT(1, stderr, "Assigned core %d to VM %d", next_cpu.id(),
-                     vm_id);
+
+        DLOG(INFO) << absl::StrFormat(
+            "GlobalScheduler: Assigned core %d to VM %d ", next_cpu.id(),
+            vm_id);
       }
 
       for (const Cpu& next_cpu : cores) {
+        CpuState* cs = cpu_state(next_cpu);
+        if (cs->current != nullptr) {
+          // some other vCPU is running on this core
+          continue;
+        }
         // Dequeue the next task from runqeue to run on this CPU.
         ShenaniganTask* next = Dequeue(vm_id);
 
@@ -342,7 +368,7 @@ void ShenaniganScheduler::GlobalSchedule(const StatusWord& agent_sw,
           continue;
         }
 
-        CpuState* cs = cpu_state(next_cpu);
+        DLOG(INFO)<< absl::StrFormat("GlobalScheduler: Scheduling task %s on CPU %d",next->gtid.describe(), next_cpu.id());
         CHECK_EQ(cs->current, nullptr);
         cs->current = next;
 
@@ -378,7 +404,7 @@ void ShenaniganScheduler::GlobalSchedule(const StatusWord& agent_sw,
       // The transaction succeeded, so the task is now running on `next_cpu`.
       TaskIsOnCpu(cs->current, next_cpu);
     } else {
-      GHOST_DPRINT(3, stderr, "Failed to commit (state=%d)", req->state());
+      DLOG(INFO) << absl::StrFormat("Failed to commit (state=%d)", req->state());
 
       cs->current->prio_boost = true;
       Enqueue(cs->current);
