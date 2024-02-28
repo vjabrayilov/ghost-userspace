@@ -94,6 +94,7 @@ FifoScheduler::CpuState* FifoScheduler::cpu_state_of(const FifoTask* task) {
 void FifoScheduler::TaskNew(FifoTask* task, const Message& msg) {
   const ghost_msg_payload_task_new* payload =
       static_cast<const ghost_msg_payload_task_new*>(msg.payload());
+  DLOG(INFO) << absl::StrFormat("TaskNew: %s", task->gtid.describe());
 
   task->seqnum = msg.seqnum();
   task->run_state = FifoTask::RunState::kBlocked;
@@ -110,7 +111,11 @@ void FifoScheduler::TaskNew(FifoTask* task, const Message& msg) {
 void FifoScheduler::TaskRunnable(FifoTask* task, const Message& msg) {
   const ghost_msg_payload_task_wakeup* payload =
       static_cast<const ghost_msg_payload_task_wakeup*>(msg.payload());
-
+  if (last_blocked != absl::InfinitePast()) {
+    auto duration = absl::ToInt64Microseconds(MonotonicNow() - last_blocked);
+    recorder.record(duration);
+  }
+  DLOG(INFO) << absl::StrFormat("TaskRunnable: %s", task->gtid.describe());
   CHECK(task->blocked());
 
   task->run_state = FifoTask::RunState::kRunnable;
@@ -119,6 +124,7 @@ void FifoScheduler::TaskRunnable(FifoTask* task, const Message& msg) {
 }
 
 void FifoScheduler::TaskDeparted(FifoTask* task, const Message& msg) {
+  DLOG(INFO) << absl::StrFormat("TaskDeparted: %s", task->gtid.describe());
   if (task->yielding()) {
     Unyield(task);
   }
@@ -138,12 +144,19 @@ void FifoScheduler::TaskDeparted(FifoTask* task, const Message& msg) {
 }
 
 void FifoScheduler::TaskDead(FifoTask* task, const Message& msg) {
+  DLOG(INFO) << absl::StrFormat("TaskDead: %s", task->gtid.describe());
   CHECK_EQ(task->run_state, FifoTask::RunState::kBlocked);
   allocator()->FreeTask(task);
   num_tasks_--;
 }
 
 void FifoScheduler::TaskBlocked(FifoTask* task, const Message& msg) {
+  DLOG(INFO) << absl::StrFormat("TaskBlocked: %s", task->gtid.describe());
+  last_blocked = MonotonicNow();
+  // auto start = MonotonicNow();
+  // auto end = MonotonicNow();
+  // duration in microseconds
+  // auto duration = absl::ToInt64Microseconds(end - start);
   if (task->oncpu()) {
     CpuState* cs = cpu_state_of(task);
     CHECK_EQ(cs->current, task);
@@ -157,6 +170,7 @@ void FifoScheduler::TaskBlocked(FifoTask* task, const Message& msg) {
 }
 
 void FifoScheduler::TaskPreempted(FifoTask* task, const Message& msg) {
+  DLOG(INFO) << absl::StrFormat("TaskPreempted: %s", task->gtid.describe());
   task->preempted = true;
 
   if (task->oncpu()) {
@@ -171,6 +185,7 @@ void FifoScheduler::TaskPreempted(FifoTask* task, const Message& msg) {
 }
 
 void FifoScheduler::TaskYield(FifoTask* task, const Message& msg) {
+  DLOG(INFO) << absl::StrFormat("TaskYield: %s", task->gtid.describe());
   if (task->oncpu()) {
     CpuState* cs = cpu_state_of(task);
     CHECK_EQ(cs->current, task);
@@ -259,6 +274,13 @@ void FifoScheduler::GlobalSchedule(const StatusWord& agent_sw,
   const int global_cpu_id = GetGlobalCPUId();
   CpuList available = topology()->EmptyCpuList();
   CpuList assigned = topology()->EmptyCpuList();
+
+  auto now = MonotonicNow();
+  if (now - last_print > absl::Seconds(1) && last_blocked != absl::InfinitePast()) {
+    recorder.printPercentiles();
+    recorder.clear();
+    last_print = now;
+  }
 
   for (const Cpu& cpu : cpus()) {
     CpuState* cs = cpu_state(cpu);

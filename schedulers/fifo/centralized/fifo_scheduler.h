@@ -7,7 +7,7 @@
 #ifndef GHOST_SCHEDULERS_FIFO_CENTRALIZED_FIFO_SCHEDULER_H
 #define GHOST_SCHEDULERS_FIFO_CENTRALIZED_FIFO_SCHEDULER_H
 
-#include <cstdint>
+#include <boost/histogram.hpp>
 #include <map>
 #include <memory>
 
@@ -63,6 +63,57 @@ struct FifoTask : public Task<> {
   // Whether the last execution was preempted or not.
   bool preempted = false;
   bool prio_boost = false;
+};
+class DynamicLatencyRecorder {
+ public:
+  DynamicLatencyRecorder() {
+    // Calculate the number of bins for two-digit precision
+    // Logarithmic scale: base 10
+    int minLog = std::log10(1);
+    int maxLog = std::log10(100000000);      // 100 seconds in microseconds
+    precision = (maxLog - minLog + 1) * 10;  // 10 bins per power of 10
+    histogram.resize(precision, 0);
+    maxRange = 100000000;  // 100 seconds in microseconds
+  }
+
+  void record(uint64_t value) {
+    if (value < 1 || value > maxRange) {
+      std::cerr << "Value out of range." << std::endl;
+      return;
+    }
+
+    int index = std::log10(value) * 10;
+    histogram[index]++;
+  }
+
+  void printPercentiles() {
+    std::vector<double> percentiles = {0.50, 0.99, 0.999};
+    uint64_t total =
+        std::accumulate(histogram.begin(), histogram.end(), uint64_t(0));
+
+    for (double percentile : percentiles) {
+      uint64_t count = 0;
+      uint64_t targetCount = static_cast<uint64_t>(percentile * total);
+      int percentileIndex = 0;
+
+      for (; percentileIndex < precision; ++percentileIndex) {
+        count += histogram[percentileIndex];
+        if (count >= targetCount) break;
+      }
+
+      double lower_bound =
+          std::pow(10, static_cast<double>(percentileIndex) / 10);
+      std::cout << "Percentile " << (percentile * 100) << ": " << lower_bound
+                << " microseconds" << std::endl;
+    }
+  }
+
+  void clear() { std::fill(histogram.begin(), histogram.end(), 0); }
+
+ private:
+  uint64_t maxRange;
+  int precision;
+  std::vector<int> histogram;
 };
 
 class FifoScheduler : public BasicDispatchScheduler<FifoTask> {
@@ -176,6 +227,10 @@ class FifoScheduler : public BasicDispatchScheduler<FifoTask> {
   absl::Time schedule_timer_start_;
   absl::Duration schedule_durations_;
   uint64_t iterations_ = 0;
+  // Hdrhistogram* schedule_durations_histogram_;
+  absl::Time last_blocked = absl::InfinitePast();
+  DynamicLatencyRecorder recorder = DynamicLatencyRecorder();
+  absl::Time last_print = MonotonicNow();
 };
 
 // Initializes the task allocator and the FIFO scheduler.
@@ -196,6 +251,7 @@ class FifoAgent : public LocalAgent {
  private:
   FifoScheduler* global_scheduler_;
 };
+
 
 class FifoConfig : public AgentConfig {
  public:

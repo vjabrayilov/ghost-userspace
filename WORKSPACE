@@ -131,9 +131,3 @@ hedron_compile_commands_setup_transitive_transitive()
 load("@hedron_compile_commands//:workspace_setup_transitive_transitive_transitive.bzl", "hedron_compile_commands_setup_transitive_transitive_transitive")
 hedron_compile_commands_setup_transitive_transitive_transitive()
 
-# HdrHistogram
-http_archive(
-    name = "hdr_histogram",
-    urls = ["https://github.com/HdrHistogram/HdrHistogram_c/archive/refs/tags/0.11.8.tar.gz"],
-    build_file="//third_party:hdr_histogram.BUILD",
-)
