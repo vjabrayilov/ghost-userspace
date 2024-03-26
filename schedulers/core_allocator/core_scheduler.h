@@ -97,6 +97,7 @@ struct ShinjukuTask : public Task<> {
     case ShinjukuTask::UnscheduleLevel::kMustUnschedule:
       return os << "Must Unschedule";
     }
+    return os;
   }
 
   RunState run_state = RunState::kBlocked;
@@ -332,9 +333,9 @@ public:
 // An global agent scheduler.  It runs a single-threaded Shinjuku scheduler on
 // the global_cpu.
 template <class EnclaveType>
-class FullShinjukuAgent : public FullAgent<EnclaveType> {
+class FullCoreAllocatorAgent : public FullAgent<EnclaveType> {
 public:
-  explicit FullShinjukuAgent(CoreAllocatorConfig config)
+  explicit FullCoreAllocatorAgent(CoreAllocatorConfig config)
       : FullAgent<EnclaveType>(config) {
     global_scheduler_ = SingleThreadShinjukuScheduler(
         &this->enclave_, *this->enclave_.cpus(), config.global_cpu_.id(),
@@ -343,7 +344,7 @@ public:
     this->enclave_.Ready();
   }
 
-  ~FullShinjukuAgent() override {
+  ~FullCoreAllocatorAgent() override {
     // Terminate global agent before satellites to avoid a false negative error
     // from ghost_run(). e.g. when the global agent tries to schedule on a CPU
     // without an active satellite agent.

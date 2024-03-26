@@ -26,7 +26,7 @@ ABSL_FLAG(absl::Duration, preemption_time_slice, absl::Microseconds(50),
 
 namespace ghost {
 
-void ParseCoreConfig(CoreAllocatorConfig *config) {
+void ParseCoreAllocatorConfig(CoreAllocatorConfig *config) {
   int firstcpu = absl::GetFlag(FLAGS_firstcpu);
   int globalcpu = absl::GetFlag(FLAGS_globalcpu);
   int ncpus = absl::GetFlag(FLAGS_ncpus);
@@ -71,7 +71,7 @@ int main(int argc, char *argv[]) {
   absl::ParseCommandLine(argc, argv);
 
   ghost::CoreAllocatorConfig config;
-  ghost::ParseCoreConfig(&config);
+  ghost::ParseCoreAllocatorConfig(&config);
 
   printf("Core map\n");
 
@@ -88,7 +88,7 @@ int main(int argc, char *argv[]) {
 
   // Using new so we can destruct the object before printing Done
   auto uap =
-      new ghost::AgentProcess<ghost::FullShinjukuAgent<ghost::LocalEnclave>,
+      new ghost::AgentProcess<ghost::FullCoreAllocatorAgent<ghost::LocalEnclave>,
                               ghost::CoreAllocatorConfig>(config);
 
   ghost::GhostHelper()->InitCore();
