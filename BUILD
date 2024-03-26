@@ -198,6 +198,44 @@ cc_binary(
 )
 
 cc_library(
+    name = "core_scheduler",
+    srcs = [
+        "schedulers/core_allocator/core_orchestrator.cc",
+        "schedulers/core_allocator/core_scheduler.cc",
+    ],
+    hdrs = [
+        "schedulers/core_allocator/core_orchestrator.h",
+        "schedulers/core_allocator/core_scheduler.h",
+    ],
+    copts = compiler_flags,
+    deps = [
+        ":agent",
+        ":ghost",
+        ":shared",
+        "@com_google_absl//absl/container:flat_hash_map",
+        "@com_google_absl//absl/functional:bind_front",
+        "@com_google_absl//absl/strings:str_format",
+        "@com_google_absl//absl/time",
+    ],
+)
+
+cc_binary(
+    name = "core_allocator",
+    srcs = [
+        "schedulers/core_allocator/agent_core_allocator.cc",
+    ],
+    copts = compiler_flags,
+    visibility = ["//experiments/scripts:__pkg__"],
+    deps = [
+        ":agent",
+        ":core_scheduler",
+        ":topology",
+        "@com_google_absl//absl/debugging:symbolize",
+        "@com_google_absl//absl/flags:parse",
+    ],
+)
+
+cc_library(
     name = "sol_scheduler",
     srcs = [
         "schedulers/sol/sol_scheduler.cc",
