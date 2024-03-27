@@ -4,8 +4,8 @@
 // license that can be found in the LICENSE file or at
 // https://developers.google.com/open-source/licenses/bsd
 
-#ifndef GHOST_SCHEDULERS_FIFO_CENTRALIZED_FIFO_SCHEDULER_H
-#define GHOST_SCHEDULERS_FIFO_CENTRALIZED_FIFO_SCHEDULER_H
+#ifndef GHOST_SCHEDULERS_CAF_SCHEDULER_H
+#define GHOST_SCHEDULERS_CAF_SCHEDULER_H
 
 #include <boost/histogram.hpp>
 #include <map>
@@ -18,7 +18,7 @@
 namespace ghost {
 
 // Store information about a scheduled task.
-struct FifoTask : public Task<> {
+struct CafTask: public Task<> {
   enum class RunState {
     kBlocked,
     kQueued,
@@ -27,9 +27,9 @@ struct FifoTask : public Task<> {
     kYielding,
   };
 
-  FifoTask(Gtid fifo_task_gtid, ghost_sw_info sw_info)
+  CafTask(Gtid fifo_task_gtid, ghost_sw_info sw_info)
       : Task<>(fifo_task_gtid, sw_info) {}
-  ~FifoTask() override {}
+  ~CafTask() override {}
 
   bool blocked() const { return run_state == RunState::kBlocked; }
   bool queued() const { return run_state == RunState::kQueued; }
@@ -37,23 +37,23 @@ struct FifoTask : public Task<> {
   bool oncpu() const { return run_state == RunState::kOnCpu; }
   bool yielding() const { return run_state == RunState::kYielding; }
 
-  static std::string_view RunStateToString(FifoTask::RunState run_state) {
+  static std::string_view RunStateToString(CafTask::RunState run_state) {
     switch (run_state) {
-      case FifoTask::RunState::kBlocked:
+      case CafTask::RunState::kBlocked:
         return "Blocked";
-      case FifoTask::RunState::kQueued:
+      case CafTask::RunState::kQueued:
         return "Queued";
-      case FifoTask::RunState::kRunnable:
+      case CafTask::RunState::kRunnable:
         return "Runnable";
-      case FifoTask::RunState::kOnCpu:
+      case CafTask::RunState::kOnCpu:
         return "OnCpu";
-      case FifoTask::RunState::kYielding:
+      case CafTask::RunState::kYielding:
         return "Yielding";
     }
   }
 
   friend std::ostream& operator<<(std::ostream& os,
-                                  FifoTask::RunState run_state) {
+                                  CafTask::RunState run_state) {
     return os << RunStateToString(run_state);
   }
 
@@ -116,24 +116,24 @@ class DynamicLatencyRecorder {
   std::vector<int> histogram;
 };
 
-class FifoScheduler : public BasicDispatchScheduler<FifoTask> {
+class CafScheduler : public BasicDispatchScheduler<CafTask> {
  public:
-  FifoScheduler(Enclave* enclave, CpuList cpulist,
-                std::shared_ptr<TaskAllocator<FifoTask>> allocator,
-                int32_t global_cpu, absl::Duration preemption_time_slice);
-  ~FifoScheduler();
+  CafScheduler(Enclave* enclave, CpuList cpulist,
+               std::shared_ptr<TaskAllocator<CafTask>> allocator,
+               int32_t global_cpu, absl::Duration preemption_time_slice);
+  ~CafScheduler();
 
   void EnclaveReady();
   Channel& GetDefaultChannel() { return global_channel_; };
 
   // Handles task messages received from the kernel via shared memory queues.
-  void TaskNew(FifoTask* task, const Message& msg);
-  void TaskRunnable(FifoTask* task, const Message& msg);
-  void TaskDeparted(FifoTask* task, const Message& msg);
-  void TaskDead(FifoTask* task, const Message& msg);
-  void TaskYield(FifoTask* task, const Message& msg);
-  void TaskBlocked(FifoTask* task, const Message& msg);
-  void TaskPreempted(FifoTask* task, const Message& msg);
+  void TaskNew(CafTask* task, const Message& msg);
+  void TaskRunnable(CafTask* task, const Message& msg);
+  void TaskDeparted(CafTask* task, const Message& msg);
+  void TaskDead(CafTask* task, const Message& msg);
+  void TaskYield(CafTask* task, const Message& msg);
+  void TaskBlocked(CafTask* task, const Message& msg);
+  void TaskPreempted(CafTask* task, const Message& msg);
 
   // Handles cpu "not idle" message. Currently a nop.
   void CpuNotIdle(const Message& msg);
@@ -144,7 +144,7 @@ class FifoScheduler : public BasicDispatchScheduler<FifoTask> {
   bool Empty() { return num_tasks_ == 0; }
 
   // Removes 'task' from the runqueue.
-  void RemoveFromRunqueue(FifoTask* task);
+  void RemoveFromRunqueue(CafTask* task);
 
   // Main scheduling function for the global agent.
   void GlobalSchedule(const StatusWord& agent_sw, BarrierToken agent_sw_last);
@@ -173,7 +173,7 @@ class FifoScheduler : public BasicDispatchScheduler<FifoTask> {
 
  private:
   struct CpuState {
-    FifoTask* current = nullptr;
+    CafTask* current = nullptr;
     const Agent* agent = nullptr;
     absl::Time last_commit;
   } ABSL_CACHELINE_ALIGNED;
@@ -181,19 +181,19 @@ class FifoScheduler : public BasicDispatchScheduler<FifoTask> {
   // Updates the state of `task` to reflect that it is now running on `cpu`.
   // This method should be called after a transaction scheduling `task` onto
   // `cpu` succeeds.
-  void TaskOnCpu(FifoTask* task, const Cpu& cpu);
+  void TaskOnCpu(CafTask* task, const Cpu& cpu);
 
   // Marks a task as yielded.
-  void Yield(FifoTask* task);
+  void Yield(CafTask* task);
   // Takes the task out of the yielding_tasks_ runqueue and puts it back into
   // the global runqueue.
-  void Unyield(FifoTask* task);
+  void Unyield(CafTask* task);
 
   // Adds a task to the FIFO runqueue.
-  void Enqueue(FifoTask* task);
+  void Enqueue(CafTask* task);
 
   // Removes and returns the task at the front of the runqueue.
-  FifoTask* Dequeue();
+  CafTask* Dequeue();
 
   // Prints all tasks (includin tasks not running or on the runqueue) managed by
   // the global agent.
@@ -204,7 +204,7 @@ class FifoScheduler : public BasicDispatchScheduler<FifoTask> {
   // is currently using the CPU.
   bool Available(const Cpu& cpu);
 
-  CpuState* cpu_state_of(const FifoTask* task);
+  CpuState* cpu_state_of(const CafTask* task);
 
   CpuState* cpu_state(const Cpu& cpu) { return &cpu_states_[cpu.id()]; }
 
@@ -221,8 +221,8 @@ class FifoScheduler : public BasicDispatchScheduler<FifoTask> {
 
   const absl::Duration preemption_time_slice_;
 
-  std::deque<FifoTask*> run_queue_;
-  std::vector<FifoTask*> yielding_tasks_;
+  std::deque<CafTask*> run_queue_;
+  std::vector<CafTask*> yielding_tasks_;
 
   absl::Time schedule_timer_start_;
   absl::Duration schedule_durations_;
@@ -234,22 +234,22 @@ class FifoScheduler : public BasicDispatchScheduler<FifoTask> {
 };
 
 // Initializes the task allocator and the FIFO scheduler.
-std::unique_ptr<FifoScheduler> SingleThreadFifoScheduler(
+std::unique_ptr<CafScheduler> SingleThreadCafScheduler(
     Enclave* enclave, CpuList cpulist, int32_t global_cpu,
     absl::Duration preemption_time_slice);
 
 // Operates as the Global or Satellite agent depending on input from the
 // global_scheduler->GetGlobalCPU callback.
-class FifoAgent : public LocalAgent {
+class CafAgent: public LocalAgent {
  public:
-  FifoAgent(Enclave* enclave, Cpu cpu, FifoScheduler* global_scheduler)
+  CafAgent(Enclave* enclave, Cpu cpu, CafScheduler* global_scheduler)
       : LocalAgent(enclave, cpu), global_scheduler_(global_scheduler) {}
 
   void AgentThread() override;
   Scheduler* AgentScheduler() const override { return global_scheduler_; }
 
  private:
-  FifoScheduler* global_scheduler_;
+  CafScheduler* global_scheduler_;
 };
 
 class CafConfig : public AgentConfig {
@@ -271,7 +271,7 @@ template <class EnclaveType>
 class FullCafAgent : public FullAgent<EnclaveType> {
  public:
   explicit FullCafAgent(CafConfig config) : FullAgent<EnclaveType>(config) {
-    global_scheduler_ = SingleThreadFifoScheduler(
+    global_scheduler_ = SingleThreadCafScheduler(
         &this->enclave_, *this->enclave_.cpus(), config.global_cpu_.id(),
         config.preemption_time_slice_);
     this->StartAgentTasks();
@@ -301,14 +301,14 @@ class FullCafAgent : public FullAgent<EnclaveType> {
   }
 
   std::unique_ptr<Agent> MakeAgent(const Cpu& cpu) override {
-    return std::make_unique<FifoAgent>(&this->enclave_, cpu,
+    return std::make_unique<CafAgent>(&this->enclave_, cpu,
                                        global_scheduler_.get());
   }
 
   void RpcHandler(int64_t req, const AgentRpcArgs& args,
                   AgentRpcResponse& response) override {
     switch (req) {
-      case FifoScheduler::kDebugRunqueue:
+      case CafScheduler::kDebugRunqueue:
         global_scheduler_->debug_runqueue_ = true;
         response.response_code = 0;
         return;
@@ -319,9 +319,9 @@ class FullCafAgent : public FullAgent<EnclaveType> {
   }
 
  private:
-  std::unique_ptr<FifoScheduler> global_scheduler_;
+  std::unique_ptr<CafScheduler> global_scheduler_;
 };
 
 }  // namespace ghost
 
-#endif  // GHOST_SCHEDULERS_FIFO_CENTRALIZED_FIFO_SCHEDULER_H
+#endif   
