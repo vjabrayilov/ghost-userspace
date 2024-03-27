@@ -81,7 +81,8 @@ void ShinjukuScheduler::DumpState(const Cpu& agent_cpu, int flags) {
     DumpAllTasks();
   }
 
-  if (!(flags & kDumpStateEmptyRQ) && RunqueueEmpty()) {
+  if (!(flags & kDumpStateEmptyRQ) &&
+      RunqueueEmpty(cpu_state(agent_cpu)->vm_id)) {
     return;
   }
 
@@ -96,7 +97,7 @@ void ShinjukuScheduler::DumpState(const Cpu& agent_cpu, int flags) {
       absl::FPrintF(stderr, "%s ", gtid.describe());
     }
   }
-  fprintf(stderr, " rq_l=%ld", RunqueueSize());
+  fprintf(stderr, " rq_l=%ld", RunqueueSize(cpu_state(agent_cpu)->vm_id));
   fprintf(stderr, "\n");
 }
 
@@ -111,6 +112,8 @@ ShinjukuScheduler::CpuState* ShinjukuScheduler::cpu_state_of(
 // Map the leader's shared memory region if we haven't already done so.
 void ShinjukuScheduler::HandleNewGtid(ShinjukuTask* task, pid_t tgid) {
   CHECK_GE(tgid, 0);
+
+  task->vm_id = tgid;
 
   if (orchs_.find(tgid) == orchs_.end()) {
     auto orch = std::make_shared<ShinjukuOrchestrator>();
@@ -342,18 +345,20 @@ void ShinjukuScheduler::Enqueue(ShinjukuTask* task, bool back) {
 
   task->run_state = ShinjukuTask::RunState::kQueued;
   if (back && !task->prio_boost) {
-    run_queue_[task->sp->GetQoS()].emplace_back(task);
+    vm_run_queues_[task->vm_id][task->sp->GetQoS()].emplace_back(task);
   } else {
-    run_queue_[task->sp->GetQoS()].emplace_front(task);
+    vm_run_queues_[task->vm_id][task->sp->GetQoS()].emplace_front(task);
   }
 }
 
-ShinjukuTask* ShinjukuScheduler::Dequeue() {
-  if (RunqueueEmpty()) {
+// TODO: (vjabrayilov) refactor such that it takes vm_id as an argument
+ShinjukuTask* ShinjukuScheduler::Dequeue(pid_t vm_id) {
+  if (RunqueueEmpty(vm_id)) {
     return nullptr;
   }
 
-  std::deque<ShinjukuTask*>& rq = run_queue_[FirstFilledRunqueue()];
+  std::deque<ShinjukuTask*>& rq =
+      vm_run_queues_[vm_id][FirstFilledRunqueue(vm_id)];
   struct ShinjukuTask* task = rq.front();
   CHECK_NE(task, nullptr);
   CHECK(task->has_work);
@@ -364,12 +369,13 @@ ShinjukuTask* ShinjukuScheduler::Dequeue() {
   return task;
 }
 
-ShinjukuTask* ShinjukuScheduler::Peek() {
-  if (RunqueueEmpty()) {
+ShinjukuTask* ShinjukuScheduler::Peek(pid_t vm_id) {
+  if (RunqueueEmpty(vm_id)) {
     return nullptr;
   }
 
-  ShinjukuTask* task = run_queue_[FirstFilledRunqueue()].front();
+  ShinjukuTask* task =
+      vm_run_queues_[vm_id][FirstFilledRunqueue(vm_id)].front();
   CHECK(task->has_work);
   CHECK_EQ(task->unschedule_level,
            ShinjukuTask::UnscheduleLevel::kNoUnschedule);
@@ -380,7 +386,7 @@ ShinjukuTask* ShinjukuScheduler::Peek() {
 void ShinjukuScheduler::RemoveFromRunqueue(ShinjukuTask* task) {
   CHECK(task->queued());
 
-  for (auto& [qos, rq] : run_queue_) {
+  for (auto& [qos, rq] : vm_run_queues_[task->vm_id]) {
     for (int pos = rq.size() - 1; pos >= 0; pos--) {
       // The [] operator for 'std::deque' is constant time
       if (rq[pos] == task) {
@@ -640,7 +646,7 @@ void ShinjukuScheduler::GlobalSchedule(const StatusWord& agent_sw,
         // not a repeatable.
         // 3. The task's unschedule level is at least `kCouldUnschedule`, making
         // the task eligible for preemption.
-        ShinjukuTask* peek = Peek();
+        ShinjukuTask* peek = Peek(cs->vm_id);
         bool should_preempt = false;
         if (peek) {
           uint32_t current_qos = cs->current->sp->GetQoS();
@@ -663,7 +669,7 @@ void ShinjukuScheduler::GlobalSchedule(const StatusWord& agent_sw,
           continue;
         }
       }
-      ShinjukuTask* to_run = Dequeue();
+      ShinjukuTask* to_run = Dequeue(cs->vm_id);
       if (!to_run) {
         // No tasks left to schedule.
         break;
@@ -836,8 +842,53 @@ void ShinjukuScheduler::GlobalSchedule(const StatusWord& agent_sw,
   }
 }
 
+// FIXME: Naive implementation. Need to optimize.
+// It just distributed the cores to the VMs based on the number of runnable
+// vCPUs at the moment.
+void ShinjukuScheduler::ReallocateCores() {
+  auto pcpu_list = cpus().ToVector();
+  auto pcpu_count = pcpu_list.size();
+
+  // Implemenet core reallocation
+  // each vm get number of cores proportional to their queue size
+
+  size_t total_runnable_vcpus = 0;
+  for (const auto& [vm_id, rq] : vm_run_queues_) {
+    total_runnable_vcpus += RunqueueSize(vm_id);
+  }
+
+  if (total_runnable_vcpus == 0) {
+    DLOG(INFO) << "No  runnable vCPUs for any VMs. Skipping core reallocation.";
+    return;
+  }
+
+  if (total_runnable_vcpus < pcpu_count) {
+    // assign sequentially
+    DLOG(INFO) << "More pCPUs availabe than the runnable vCPUs. Assigning "
+                  "sequentially.";
+    size_t i = 0;
+    for (const auto& [vm_id, rq] : vm_run_queues_) {
+      for (; i < RunqueueSize(vm_id); i++) {
+        cpu_state(pcpu_list[i])->vm_id = vm_id;
+      }
+    }
+  } else {
+    DLOG(INFO) << "Assigning cores proportional to the # of runnable vCPUs.";
+    size_t i = 0;
+    for (const auto& [vm_id, rq] : vm_run_queues_) {
+      auto per_vm_quota =
+          std::lround(pcpu_count * static_cast<double>(RunqueueSize(vm_id)) /
+                      total_runnable_vcpus);
+      for (size_t j = 0; j < per_vm_quota; i++,j++) {
+        cpu_state(pcpu_list[i+j])->vm_id = vm_id;
+      }
+    }
+  }
+}
+
 void ShinjukuScheduler::PickNextGlobalCPU(BarrierToken agent_barrier) {
   // TODO: Select CPUs more intelligently.
+  // TOOD: (vjabrayilov) maybe optimized ???
   for (const Cpu& cpu : cpus()) {
     if (Available(cpu) && cpu.id() != GetGlobalCPUId()) {
       CpuState* cs = cpu_state(cpu);
@@ -864,6 +915,7 @@ void ShinjukuScheduler::PickNextGlobalCPU(BarrierToken agent_barrier) {
       break;
     }
   }
+  DLOG(INFO) << "Global agent migrated to CPU " << GetGlobalCPUId();
 }
 
 std::unique_ptr<ShinjukuScheduler> SingleThreadShinjukuScheduler(
@@ -899,6 +951,7 @@ void ShinjukuAgent::AgentThread() {
       }
       req->LocalYield(agent_barrier, /*flags=*/0);
     } else {
+      // (vjabrayilov) CPU running the global agent.
       if (boosted_priority()) {
         global_scheduler_->PickNextGlobalCPU(agent_barrier);
         continue;
@@ -909,6 +962,9 @@ void ShinjukuAgent::AgentThread() {
         global_scheduler_->DispatchMessage(msg);
         global_channel.Consume(msg);
       }
+      // TODO: (vjabrayilov) (re)allocate cores here.
+      // We've already processed messages and built run_queues per VM.
+      global_scheduler_->ReallocateCores();
 
       // Order matters here: when a worker is PAUSED we defer the
       // preemption until GlobalSchedule() hoping to combine the

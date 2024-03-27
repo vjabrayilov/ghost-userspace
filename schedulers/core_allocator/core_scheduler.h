@@ -64,19 +64,19 @@ struct ShinjukuTask : public Task<> {
 
   static std::string_view RunStateToString(ShinjukuTask::RunState run_state) {
     switch (run_state) {
-    case ShinjukuTask::RunState::kBlocked:
-      return "Blocked";
-    case ShinjukuTask::RunState::kQueued:
-      return "Queued";
-    case ShinjukuTask::RunState::kOnCpu:
-      return "OnCpu";
-    case ShinjukuTask::RunState::kYielding:
-      return "Yielding";
-    case ShinjukuTask::RunState::kPaused:
-      return "Paused";
-      // We will get a compile error if a new member is added to the
-      // `ShinjukuTask::RunState` enum and a corresponding case is not added
-      // here.
+      case ShinjukuTask::RunState::kBlocked:
+        return "Blocked";
+      case ShinjukuTask::RunState::kQueued:
+        return "Queued";
+      case ShinjukuTask::RunState::kOnCpu:
+        return "OnCpu";
+      case ShinjukuTask::RunState::kYielding:
+        return "Yielding";
+      case ShinjukuTask::RunState::kPaused:
+        return "Paused";
+        // We will get a compile error if a new member is added to the
+        // `ShinjukuTask::RunState` enum and a corresponding case is not added
+        // here.
     }
     CHECK(false);
     return "Unknown run state";
@@ -87,15 +87,15 @@ struct ShinjukuTask : public Task<> {
     return os << RunStateToString(run_state);
   }
 
-  friend std::ostream &
-  operator<<(std::ostream &os, ShinjukuTask::UnscheduleLevel unschedule_level) {
+  friend std::ostream &operator<<(
+      std::ostream &os, ShinjukuTask::UnscheduleLevel unschedule_level) {
     switch (unschedule_level) {
-    case ShinjukuTask::UnscheduleLevel::kNoUnschedule:
-      return os << "No Unschedule";
-    case ShinjukuTask::UnscheduleLevel::kCouldUnschedule:
-      return os << "Could Unschedule";
-    case ShinjukuTask::UnscheduleLevel::kMustUnschedule:
-      return os << "Must Unschedule";
+      case ShinjukuTask::UnscheduleLevel::kNoUnschedule:
+        return os << "No Unschedule";
+      case ShinjukuTask::UnscheduleLevel::kCouldUnschedule:
+        return os << "Could Unschedule";
+      case ShinjukuTask::UnscheduleLevel::kMustUnschedule:
+        return os << "Must Unschedule";
     }
     return os;
   }
@@ -129,6 +129,8 @@ struct ShinjukuTask : public Task<> {
   // Indicates whether there is a pending deferred unschedule for this task, and
   // if so, whether the unschedule could optionally happen or must happen.
   UnscheduleLevel unschedule_level = UnscheduleLevel::kNoUnschedule;
+  // which VM this vCPU belongs to
+  pid_t vm_id = -1;
 };
 
 // Implements the global agent policy layer and the Shinjuku scheduling
@@ -138,7 +140,7 @@ struct ShinjukuTask : public Task<> {
 // low-latency app a high QoS class and an antagonist (that consumes CPU cycles)
 // a low QoS class.
 class ShinjukuScheduler : public BasicDispatchScheduler<ShinjukuTask> {
-public:
+ public:
   explicit ShinjukuScheduler(
       Enclave *enclave, CpuList cpulist,
       std::shared_ptr<TaskAllocator<ShinjukuTask>> allocator,
@@ -186,6 +188,9 @@ public:
     global_cpu_.store(cpu.id(), std::memory_order_release);
   }
 
+  // Distributes cores among VMs similar to Shenango.
+  void ReallocateCores();
+
   // When a different scheduling class (e.g., CFS) has a task to run on the
   // global agent's CPU, the global agent calls this function to try to pick a
   // new CPU to move to and, if a new CPU is found, to initiate the handoff
@@ -199,11 +204,12 @@ public:
 
   static constexpr int kDebugRunqueue = 1;
 
-private:
+ private:
   struct CpuState {
     ShinjukuTask *current = nullptr;
     ShinjukuTask *next = nullptr;
     const Agent *agent = nullptr;
+    pid_t vm_id = -1;
   } ABSL_CACHELINE_ALIGNED;
 
   // Stop 'task' from running and schedule nothing in its place. 'task' must be
@@ -225,10 +231,10 @@ private:
   void Enqueue(ShinjukuTask *task, bool back = true);
 
   // Removes and returns the task at the front of the runqueue.
-  ShinjukuTask *Dequeue();
+  ShinjukuTask *Dequeue(pid_t vm_id);
 
   // Returns (but does not remove) the task at the front of the runqueue.
-  ShinjukuTask *Peek();
+  ShinjukuTask *Peek(pid_t vm_pid);
 
   // Prints all tasks (includin tasks not running or on the runqueue) managed by
   // the global agent.
@@ -255,20 +261,21 @@ private:
 
   CpuState *cpu_state(const Cpu &cpu) { return &cpu_states_[cpu.id()]; }
 
-  size_t RunqueueSize() const {
+  size_t RunqueueSize(pid_t vm_id) const {
     size_t size = 0;
-    for (const auto &[qos, rq] : run_queue_) {
+    for (const auto &[qos, rq] : vm_run_queues_.at(vm_id)) {
       size += rq.size();
     }
     return size;
   }
 
-  bool RunqueueEmpty() const { return RunqueueSize() == 0; }
+  bool RunqueueEmpty(pid_t vm_id) const { return RunqueueSize(vm_id) == 0; }
 
   // Returns the highest-QoS runqueue that has at least one task enqueued.
   // Must call this on a non-empty runqueue.
-  uint32_t FirstFilledRunqueue() const {
-    for (auto it = run_queue_.rbegin(); it != run_queue_.rend(); it++) {
+  uint32_t FirstFilledRunqueue(pid_t vm_id) const {
+    for (auto it = vm_run_queues_.at(vm_id).rbegin();
+         it != vm_run_queues_.at(vm_id).rend(); it++) {
       if (!it->second.empty()) {
         return it->first;
       }
@@ -291,7 +298,9 @@ private:
   // Map from QoS level to runqueue
   // We use an 'std::map' rather than 'absl::flat_hash_map' because we need to
   // iterate on the map in order of QoS level.
-  std::map<uint32_t, std::deque<ShinjukuTask *>> run_queue_;
+  // FIXME: (vjabrayilov) added nested map, think about performance implications
+  std::map<pid_t, std::map<uint32_t, std::deque<ShinjukuTask *>>>
+      vm_run_queues_;
   std::vector<ShinjukuTask *> paused_repeatables_;
   std::vector<ShinjukuTask *> yielding_tasks_;
   absl::flat_hash_map<pid_t, std::shared_ptr<ShinjukuOrchestrator>> orchs_;
@@ -301,27 +310,26 @@ private:
 };
 
 // Initializes the task allocator and the Shinjuku scheduler.
-std::unique_ptr<ShinjukuScheduler>
-SingleThreadShinjukuScheduler(Enclave *enclave, CpuList cpulist,
-                              int32_t global_cpu,
-                              absl::Duration preemption_time_slice);
+std::unique_ptr<ShinjukuScheduler> SingleThreadShinjukuScheduler(
+    Enclave *enclave, CpuList cpulist, int32_t global_cpu,
+    absl::Duration preemption_time_slice);
 
 // Operates as the Global or Satellite agent depending on input from the
 // global_scheduler->GetGlobalCPU callback.
 class ShinjukuAgent : public LocalAgent {
-public:
+ public:
   ShinjukuAgent(Enclave *enclave, Cpu cpu, ShinjukuScheduler *global_scheduler)
       : LocalAgent(enclave, cpu), global_scheduler_(global_scheduler) {}
 
   void AgentThread() override;
   Scheduler *AgentScheduler() const override { return global_scheduler_; }
 
-private:
+ private:
   ShinjukuScheduler *global_scheduler_;
 };
 
 class CoreAllocatorConfig : public AgentConfig {
-public:
+ public:
   CoreAllocatorConfig() {}
   CoreAllocatorConfig(Topology *topology, CpuList cpulist, Cpu global_cpu)
       : AgentConfig(topology, std::move(cpulist)), global_cpu_(global_cpu) {}
@@ -334,7 +342,7 @@ public:
 // the global_cpu.
 template <class EnclaveType>
 class FullCoreAllocatorAgent : public FullAgent<EnclaveType> {
-public:
+ public:
   explicit FullCoreAllocatorAgent(CoreAllocatorConfig config)
       : FullAgent<EnclaveType>(config) {
     global_scheduler_ = SingleThreadShinjukuScheduler(
@@ -374,20 +382,20 @@ public:
   void RpcHandler(int64_t req, const AgentRpcArgs &args,
                   AgentRpcResponse &response) override {
     switch (req) {
-    case ShinjukuScheduler::kDebugRunqueue:
-      global_scheduler_->debug_runqueue_ = true;
-      response.response_code = 0;
-      return;
-    default:
-      response.response_code = -1;
-      return;
+      case ShinjukuScheduler::kDebugRunqueue:
+        global_scheduler_->debug_runqueue_ = true;
+        response.response_code = 0;
+        return;
+      default:
+        response.response_code = -1;
+        return;
     }
   }
 
-private:
+ private:
   std::unique_ptr<ShinjukuScheduler> global_scheduler_;
 };
 
-} // namespace ghost
+}  // namespace ghost
 
-#endif // GHOST_SCHEDULERS_SHINJUKU_SHINJUKU_SCHEDULER_H
+#endif  // GHOST_SCHEDULERS_SHINJUKU_SHINJUKU_SCHEDULER_H

@@ -64,7 +64,7 @@ void ParseCoreAllocatorConfig(CoreAllocatorConfig *config) {
   }
 }
 
-} // namespace ghost
+}  // namespace ghost
 
 int main(int argc, char *argv[]) {
   absl::InitializeSymbolizer(argv[0]);
@@ -78,8 +78,7 @@ int main(int argc, char *argv[]) {
   int n = 0;
   for (const ghost::Cpu &c : config.topology_->all_cores()) {
     printf("( ");
-    for (const ghost::Cpu &s : c.siblings())
-      printf("%2d ", s.id());
+    for (const ghost::Cpu &s : c.siblings()) printf("%2d ", s.id());
     printf(")%c", ++n % 8 == 0 ? '\n' : '\t');
   }
   printf("\n");
@@ -87,9 +86,9 @@ int main(int argc, char *argv[]) {
   printf("Initializing...\n");
 
   // Using new so we can destruct the object before printing Done
-  auto uap =
-      new ghost::AgentProcess<ghost::FullCoreAllocatorAgent<ghost::LocalEnclave>,
-                              ghost::CoreAllocatorConfig>(config);
+  auto uap = new ghost::AgentProcess<
+      ghost::FullCoreAllocatorAgent<ghost::LocalEnclave>,
+      ghost::CoreAllocatorConfig>(config);
 
   ghost::GhostHelper()->InitCore();
   printf("Initialization complete, ghOSt active.\n");
@@ -103,17 +102,18 @@ int main(int argc, char *argv[]) {
 
   ghost::Notification exit;
   ghost::GhostSignals::AddHandler(SIGINT, [&exit](int) {
-    static bool first = true; // We only modify the first SIGINT.
+    static bool first = true;  // We only modify the first SIGINT.
 
     if (first) {
       exit.Notify();
       first = false;
-      return false; // We'll exit on subsequent SIGTERMs.
+      return false;  // We'll exit on subsequent SIGTERMs.
     }
     return true;
   });
 
   // TODO: this is racy - uap could be deleted already
+  // FIXME: handle ShingujuScheduler here
   ghost::GhostSignals::AddHandler(SIGUSR1, [uap](int) {
     uap->Rpc(ghost::ShinjukuScheduler::kDebugRunqueue);
     return false;
