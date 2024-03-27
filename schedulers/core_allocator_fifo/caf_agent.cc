@@ -21,13 +21,13 @@
 ABSL_FLAG(std::string, ghost_cpus, "1-5", "cpulist");
 ABSL_FLAG(int32_t, globalcpu, -1,
           "Global cpu. If -1, then defaults to the first cpu in <cpus>");
-ABSL_FLAG(absl::Duration, preemption_time_slice, absl::InfiniteDuration(),
+ABSL_FLAG(absl::Duration, preemption_time_slice, absl::Microseconds(50),
           "A task is preempted after running for this time slice (default = "
-          "infinite time slice)");
+          "50 us)");
 
 namespace ghost {
 
-void ParseFifoConfig(FifoConfig* config) {
+void ParseCafConfig(CafConfig* config) {
   CpuList ghost_cpus =
       MachineTopology()->ParseCpuStr(absl::GetFlag(FLAGS_ghost_cpus));
   // One CPU for the spinning global agent and at least one other for running
@@ -56,8 +56,8 @@ int main(int argc, char* argv[]) {
 
   absl::ParseCommandLine(argc, argv);
 
-  ghost::FifoConfig config;
-  ghost::ParseFifoConfig(&config);
+  ghost::CafConfig config;
+  ghost::ParseCafConfig(&config);
 
   printf("Core map\n");
 
@@ -72,8 +72,8 @@ int main(int argc, char* argv[]) {
   printf("Initializing...\n");
 
   // Using new so we can destruct the object before printing Done
-  auto uap = new ghost::AgentProcess<ghost::FullFifoAgent<ghost::LocalEnclave>,
-                                     ghost::FifoConfig>(config);
+  auto uap = new ghost::AgentProcess<ghost::FullCafAgent<ghost::LocalEnclave>,
+                                     ghost::CafConfig>(config);
 
   ghost::GhostHelper()->InitCore();
 

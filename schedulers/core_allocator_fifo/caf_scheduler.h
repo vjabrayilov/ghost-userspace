@@ -252,12 +252,11 @@ class FifoAgent : public LocalAgent {
   FifoScheduler* global_scheduler_;
 };
 
-
-class FifoConfig : public AgentConfig {
+class CafConfig : public AgentConfig {
  public:
-  FifoConfig() {}
-  FifoConfig(Topology* topology, CpuList cpulist, Cpu global_cpu,
-             absl::Duration preemption_time_slice)
+  CafConfig() {}
+  CafConfig(Topology* topology, CpuList cpulist, Cpu global_cpu,
+            absl::Duration preemption_time_slice)
       : AgentConfig(topology, std::move(cpulist)),
         global_cpu_(global_cpu),
         preemption_time_slice_(preemption_time_slice) {}
@@ -269,9 +268,9 @@ class FifoConfig : public AgentConfig {
 // A global agent scheduler. It runs a single-threaded FIFO scheduler on the
 // global_cpu.
 template <class EnclaveType>
-class FullFifoAgent : public FullAgent<EnclaveType> {
+class FullCafAgent : public FullAgent<EnclaveType> {
  public:
-  explicit FullFifoAgent(FifoConfig config) : FullAgent<EnclaveType>(config) {
+  explicit FullCafAgent(CafConfig config) : FullAgent<EnclaveType>(config) {
     global_scheduler_ = SingleThreadFifoScheduler(
         &this->enclave_, *this->enclave_.cpus(), config.global_cpu_.id(),
         config.preemption_time_slice_);
@@ -279,7 +278,7 @@ class FullFifoAgent : public FullAgent<EnclaveType> {
     this->enclave_.Ready();
   }
 
-  ~FullFifoAgent() override {
+  ~FullCafAgent() override {
     // Terminate global agent before satellites to avoid a false negative error
     // from ghost_run(). e.g. when the global agent tries to schedule on a CPU
     // without an active satellite agent.
