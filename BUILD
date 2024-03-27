@@ -748,6 +748,38 @@ cc_library(
 )
 
 cc_binary(
+    name = "core_allocator_fifo",
+    srcs = [
+        "schedulers/core_allocator_fifo/caf_agent.cc",
+    ],
+    copts = compiler_flags,
+    deps = [
+        ":agent",
+        ":core_allocator_fifo_scheduler",
+        ":topology",
+        "@com_google_absl//absl/debugging:symbolize",
+        "@com_google_absl//absl/flags:parse",
+    ],
+)
+
+cc_library(
+    name = "core_allocator_fifo_scheduler",
+    srcs = [
+        "schedulers/core_allocator_fifo/caf_scheduler.cc",
+        "schedulers/core_allocator_fifo/caf_scheduler.h",
+    ],
+    hdrs = [
+        "schedulers/core_allocator_fifo/caf_scheduler.h",
+    ],
+    copts = compiler_flags,
+    deps = [
+        ":agent",
+        "@com_google_absl//absl/strings:str_format",
+        "@com_google_absl//absl/time",
+    ],
+)
+
+cc_binary(
     name="shenanigan",
     srcs=[
         "schedulers/shenanigan/agent_shenanigan.cc",
