@@ -18,7 +18,7 @@
 namespace ghost {
 
 // Store information about a scheduled task.
-struct CafTask: public Task<> {
+struct CafTask : public Task<> {
   enum class RunState {
     kBlocked,
     kQueued,
@@ -50,6 +50,7 @@ struct CafTask: public Task<> {
       case CafTask::RunState::kYielding:
         return "Yielding";
     }
+    return "Unknown";
   }
 
   friend std::ostream& operator<<(std::ostream& os,
@@ -63,6 +64,7 @@ struct CafTask: public Task<> {
   // Whether the last execution was preempted or not.
   bool preempted = false;
   bool prio_boost = false;
+  pid_t vm_id = -1;
 };
 class DynamicLatencyRecorder {
  public:
@@ -158,6 +160,8 @@ class CafScheduler : public BasicDispatchScheduler<CafTask> {
     global_cpu_.store(cpu.id(), std::memory_order_release);
   }
 
+  void ReallocateCores();
+
   // When a different scheduling class (e.g., CFS) has a task to run on the
   // global agent's CPU, the global agent calls this function to try to pick a
   // new CPU to move to and, if a new CPU is found, to initiate the handoff
@@ -176,6 +180,7 @@ class CafScheduler : public BasicDispatchScheduler<CafTask> {
     CafTask* current = nullptr;
     const Agent* agent = nullptr;
     absl::Time last_commit;
+    pid_t vm_id = -1;
   } ABSL_CACHELINE_ALIGNED;
 
   // Updates the state of `task` to reflect that it is now running on `cpu`.
@@ -193,7 +198,7 @@ class CafScheduler : public BasicDispatchScheduler<CafTask> {
   void Enqueue(CafTask* task);
 
   // Removes and returns the task at the front of the runqueue.
-  CafTask* Dequeue();
+  CafTask* Dequeue(pid_t vm_id);
 
   // Prints all tasks (includin tasks not running or on the runqueue) managed by
   // the global agent.
@@ -208,9 +213,11 @@ class CafScheduler : public BasicDispatchScheduler<CafTask> {
 
   CpuState* cpu_state(const Cpu& cpu) { return &cpu_states_[cpu.id()]; }
 
-  size_t RunqueueSize() const { return run_queue_.size(); }
+  size_t RunqueueSize(pid_t vm_id) const {
+    return vm_run_queues_.at(vm_id).size();
+  }
 
-  bool RunqueueEmpty() const { return RunqueueSize() == 0; }
+  bool RunqueueEmpty(pid_t vm_id) const { return RunqueueSize(vm_id) == 0; }
 
   CpuState cpu_states_[MAX_CPUS];
 
@@ -221,16 +228,13 @@ class CafScheduler : public BasicDispatchScheduler<CafTask> {
 
   const absl::Duration preemption_time_slice_;
 
-  std::deque<CafTask*> run_queue_;
+  std::map<pid_t, std::deque<CafTask*>> vm_run_queues_;
   std::vector<CafTask*> yielding_tasks_;
 
   absl::Time schedule_timer_start_;
   absl::Duration schedule_durations_;
   uint64_t iterations_ = 0;
-  // Hdrhistogram* schedule_durations_histogram_;
   absl::Time last_blocked = absl::InfinitePast();
-  DynamicLatencyRecorder recorder = DynamicLatencyRecorder();
-  absl::Time last_print = MonotonicNow();
 };
 
 // Initializes the task allocator and the FIFO scheduler.
@@ -240,7 +244,7 @@ std::unique_ptr<CafScheduler> SingleThreadCafScheduler(
 
 // Operates as the Global or Satellite agent depending on input from the
 // global_scheduler->GetGlobalCPU callback.
-class CafAgent: public LocalAgent {
+class CafAgent : public LocalAgent {
  public:
   CafAgent(Enclave* enclave, Cpu cpu, CafScheduler* global_scheduler)
       : LocalAgent(enclave, cpu), global_scheduler_(global_scheduler) {}
@@ -302,7 +306,7 @@ class FullCafAgent : public FullAgent<EnclaveType> {
 
   std::unique_ptr<Agent> MakeAgent(const Cpu& cpu) override {
     return std::make_unique<CafAgent>(&this->enclave_, cpu,
-                                       global_scheduler_.get());
+                                      global_scheduler_.get());
   }
 
   void RpcHandler(int64_t req, const AgentRpcArgs& args,
@@ -324,4 +328,4 @@ class FullCafAgent : public FullAgent<EnclaveType> {
 
 }  // namespace ghost
 
-#endif   
+#endif

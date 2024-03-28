@@ -63,8 +63,8 @@ void CafScheduler::DumpState(const Cpu& agent_cpu, int flags) {
   if (flags & kDumpAllTasks) {
     DumpAllTasks();
   }
-
-  if (!(flags & kDumpStateEmptyRQ) && RunqueueEmpty()) {
+  pid_t vm_id = cpu_state(agent_cpu)->vm_id;
+  if (!(flags & kDumpStateEmptyRQ) && RunqueueEmpty(vm_id)) {
     return;
   }
 
@@ -79,7 +79,7 @@ void CafScheduler::DumpState(const Cpu& agent_cpu, int flags) {
       absl::FPrintF(stderr, "%s ", gtid.describe());
     }
   }
-  fprintf(stderr, " rq_l=%ld", RunqueueSize());
+  fprintf(stderr, " vm(%d): rq_l=%ld", vm_id, RunqueueSize(vm_id));
   fprintf(stderr, "\n");
 }
 
@@ -100,6 +100,7 @@ void CafScheduler::TaskNew(CafTask* task, const Message& msg) {
   task->run_state = CafTask::RunState::kBlocked;
 
   const Gtid gtid(payload->gtid);
+  task->vm_id = gtid.tgid();
   if (payload->runnable) {
     task->run_state = CafTask::RunState::kRunnable;
     Enqueue(task);
@@ -111,10 +112,6 @@ void CafScheduler::TaskNew(CafTask* task, const Message& msg) {
 void CafScheduler::TaskRunnable(CafTask* task, const Message& msg) {
   const ghost_msg_payload_task_wakeup* payload =
       static_cast<const ghost_msg_payload_task_wakeup*>(msg.payload());
-  if (last_blocked != absl::InfinitePast()) {
-    auto duration = absl::ToInt64Microseconds(MonotonicNow() - last_blocked);
-    recorder.record(duration);
-  }
   DLOG(INFO) << absl::StrFormat("TaskRunnable: %s", task->gtid.describe());
   CHECK(task->blocked());
 
@@ -220,21 +217,21 @@ void CafScheduler::Enqueue(CafTask* task) {
   CHECK_EQ(task->run_state, CafTask::RunState::kRunnable);
   task->run_state = CafTask::RunState::kQueued;
   if (task->prio_boost || task->preempted) {
-    run_queue_.push_front(task);
+    vm_run_queues_[task->vm_id].push_front(task);
   } else {
-    run_queue_.push_back(task);
+    vm_run_queues_[task->vm_id].push_back(task);
   }
 }
 
-CafTask* CafScheduler::Dequeue() {
-  if (RunqueueEmpty()) {
+CafTask* CafScheduler::Dequeue(pid_t vm_id) {
+  if (vm_id == -1 || RunqueueEmpty(vm_id)) {
     return nullptr;
   }
 
-  CafTask* task = run_queue_.front();
+  CafTask* task = vm_run_queues_[vm_id].front();
   CHECK_EQ(task->run_state, CafTask::RunState::kQueued);
   task->run_state = CafTask::RunState::kRunnable;
-  run_queue_.pop_front();
+  vm_run_queues_[vm_id].pop_front();
 
   return task;
 }
@@ -242,6 +239,7 @@ CafTask* CafScheduler::Dequeue() {
 void CafScheduler::RemoveFromRunqueue(CafTask* task) {
   CHECK(task->queued());
 
+  auto& run_queue_ = vm_run_queues_[task->vm_id];
   for (int pos = run_queue_.size() - 1; pos >= 0; pos--) {
     // The [] operator for 'std::deque' is constant time
     if (run_queue_[pos] == task) {
@@ -260,6 +258,7 @@ void CafScheduler::RemoveFromRunqueue(CafTask* task) {
 void CafScheduler::TaskOnCpu(CafTask* task, const Cpu& cpu) {
   CpuState* cs = cpu_state(cpu);
   CHECK_EQ(task, cs->current);
+  CHECK_EQ(task->vm_id, cs->vm_id);
 
   GHOST_DPRINT(3, stderr, "Task %s oncpu %d", task->gtid.describe(), cpu.id());
 
@@ -274,14 +273,6 @@ void CafScheduler::GlobalSchedule(const StatusWord& agent_sw,
   const int global_cpu_id = GetGlobalCPUId();
   CpuList available = topology()->EmptyCpuList();
   CpuList assigned = topology()->EmptyCpuList();
-
-  auto now = MonotonicNow();
-  if (now - last_print > absl::Seconds(1) &&
-      last_blocked != absl::InfinitePast()) {
-    recorder.printPercentiles();
-    recorder.clear();
-    last_print = now;
-  }
 
   for (const Cpu& cpu : cpus()) {
     CpuState* cs = cpu_state(cpu);
@@ -306,7 +297,11 @@ void CafScheduler::GlobalSchedule(const StatusWord& agent_sw,
   }
 
   while (!available.Empty()) {
-    CafTask* next = Dequeue();
+    // Assign `next` to run on the CPU at the front of `available`.
+    const Cpu& next_cpu = available.Front();
+    CpuState* cs = cpu_state(next_cpu);
+
+    CafTask* next = Dequeue(cs->vm_id);
     if (!next) {
       break;
     }
@@ -325,10 +320,6 @@ void CafScheduler::GlobalSchedule(const StatusWord& agent_sw,
       continue;
     }
 
-    // Assign `next` to run on the CPU at the front of `available`.
-    const Cpu& next_cpu = available.Front();
-    CpuState* cs = cpu_state(next_cpu);
-
     if (cs->current) {
       cs->current->run_state = CafTask::RunState::kRunnable;
       Enqueue(cs->current);
@@ -338,13 +329,18 @@ void CafScheduler::GlobalSchedule(const StatusWord& agent_sw,
     available.Clear(next_cpu);
     assigned.Set(next_cpu);
 
+    CHECK(cs->vm_id == next->vm_id);
+    CHECK(cs->vm_id != GetGlobalCPUId());
+
     RunRequest* req = enclave()->GetRunRequest(next_cpu);
     req->Open({.target = next->gtid,
                .target_barrier = next->seqnum,
                // No need to set `agent_barrier` because the agent barrier is
                // not checked when a global agent is scheduling a CPU other than
                // the one that the global agent is currently running on.
-               .commit_flags = COMMIT_AT_TXN_COMMIT});
+               .commit_flags = COMMIT_AT_TXN_COMMIT,
+               .sync_group_owner = next_cpu.id(),
+               .allow_txn_target_on_cpu = true});
   }
 
   // Commit on all CPUs with open transactions.
@@ -383,6 +379,59 @@ void CafScheduler::GlobalSchedule(const StatusWord& agent_sw,
       Enqueue(t);
     }
     yielding_tasks_.clear();
+  }
+}
+
+void CafScheduler::ReallocateCores() {
+  auto pcpu_list = cpus().ToVector();
+  auto global_cpu_id = GetGlobalCPUId();
+  // remove global cpu from the pcpu_list
+  pcpu_list.erase(std::remove_if(pcpu_list.begin(), pcpu_list.end(),
+                                 [global_cpu_id](const Cpu& cpu) {
+                                   return cpu.id() == global_cpu_id;
+                                 }),
+                  pcpu_list.end());
+  auto pcpu_count = pcpu_list.size();
+
+  // Implemenet core reallocation
+  // each vm get number of cores proportional to their queue size
+
+  size_t total_runnable_vcpus = 0;
+  for (const auto& [vm_id, rq] : vm_run_queues_) {
+    total_runnable_vcpus += RunqueueSize(vm_id);
+  }
+
+  if (total_runnable_vcpus == 0) {
+    DLOG(INFO) << "No  runnable vCPUs for any VMs. Skipping core reallocation.";
+    return;
+  }
+
+  if (total_runnable_vcpus < pcpu_count) {
+    // assign sequentially
+    DLOG(INFO) << "More pCPUs availabe than the runnable vCPUs. Assigning "
+                  "sequentially.";
+    size_t i = 0;
+    for (const auto& [vm_id, rq] : vm_run_queues_) {
+      for (; i < RunqueueSize(vm_id); i++) {
+        CHECK(pcpu_list[i].id() != global_cpu_id);
+        cpu_state(pcpu_list[i])->vm_id = vm_id;
+      }
+    }
+  } else {
+    DLOG(INFO) << "Assigning cores proportional to the # of runnable vCPUs.";
+    // size_t i = 0;
+    for (const auto& [vm_id, rq] : vm_run_queues_) {
+      auto per_vm_quota =
+          std::lround(pcpu_count * static_cast<double>(RunqueueSize(vm_id)) /
+                      total_runnable_vcpus);
+      DLOG(INFO) << "VM: " << vm_id << " per_vm_quota: " << per_vm_quota;
+      CHECK_LE(per_vm_quota, pcpu_list.size());
+      for (size_t j = 0; j < per_vm_quota;j++) {
+        cpu_state(pcpu_list.back())->vm_id = vm_id;
+        pcpu_list.pop_back();
+        // cpu_state(pcpu_list[i + j])->vm_id = vm_id;
+      }
+    }
   }
 }
 
@@ -457,14 +506,15 @@ found:
   SetGlobalCPU(target);
   enclave()->GetAgent(target)->Ping();
 
+  DLOG(INFO) << "Global agent moved from " << global_cpu.id()
+             << " to CPU: " << target.id();
   return true;
 }
 
 std::unique_ptr<CafScheduler> SingleThreadCafScheduler(
     Enclave* enclave, CpuList cpulist, int32_t global_cpu,
     absl::Duration preemption_time_slice) {
-  auto allocator =
-      std::make_shared<SingleThreadMallocTaskAllocator<CafTask>>();
+  auto allocator = std::make_shared<SingleThreadMallocTaskAllocator<CafTask>>();
   auto scheduler = std::make_unique<CafScheduler>(
       enclave, std::move(cpulist), std::move(allocator), global_cpu,
       preemption_time_slice);
@@ -503,6 +553,8 @@ void CafAgent::AgentThread() {
         global_scheduler_->DispatchMessage(msg);
         global_channel.Consume(msg);
       }
+
+      global_scheduler_->ReallocateCores();
 
       global_scheduler_->GlobalSchedule(status_word(), agent_barrier);
 
