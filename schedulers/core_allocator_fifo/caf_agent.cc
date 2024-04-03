@@ -24,6 +24,9 @@ ABSL_FLAG(int32_t, globalcpu, -1,
 ABSL_FLAG(absl::Duration, preemption_time_slice, absl::Microseconds(50),
           "A task is preempted after running for this time slice (default = "
           "50 us)");
+ABSL_FLAG(
+    absl::Duration, reallocation_interval, absl::Microseconds(100),
+    "Cores are reallocated each reallocation interval (default = 100 us)");
 
 namespace ghost {
 
@@ -47,6 +50,7 @@ void ParseCafConfig(CafConfig* config) {
   config->cpus_ = ghost_cpus;
   config->global_cpu_ = topology->cpu(globalcpu);
   config->preemption_time_slice_ = absl::GetFlag(FLAGS_preemption_time_slice);
+  config->reallocation_interval_ = absl::GetFlag(FLAGS_reallocation_interval);
 }
 
 }  // namespace ghost

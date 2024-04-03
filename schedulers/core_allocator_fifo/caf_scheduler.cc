@@ -19,11 +19,13 @@ void CafScheduler::CpuTimerExpired(const Message& msg) { CHECK(0); }
 CafScheduler::CafScheduler(Enclave* enclave, CpuList cpulist,
                            std::shared_ptr<TaskAllocator<CafTask>> allocator,
                            int32_t global_cpu,
-                           absl::Duration preemption_time_slice)
+                           absl::Duration preemption_time_slice,
+                           absl::Duration reallocation_interval)
     : BasicDispatchScheduler(enclave, std::move(cpulist), std::move(allocator)),
       global_cpu_(global_cpu),
       global_channel_(GHOST_MAX_QUEUE_ELEMS, /*node=*/0),
-      preemption_time_slice_(preemption_time_slice) {
+      preemption_time_slice_(preemption_time_slice),
+      reallocation_interval_(reallocation_interval) {
   if (!cpus().IsSet(global_cpu_)) {
     Cpu c = cpus().Front();
     CHECK(c.valid());
@@ -101,6 +103,9 @@ void CafScheduler::TaskNew(CafTask* task, const Message& msg) {
 
   const Gtid gtid(payload->gtid);
   task->vm_id = gtid.tgid();
+  if (vm_run_queues_.find(task->vm_id) == vm_run_queues_.end()) {
+    new_vm_joined_ = true;
+  }
   if (payload->runnable) {
     task->run_state = CafTask::RunState::kRunnable;
     Enqueue(task);
@@ -383,6 +388,12 @@ void CafScheduler::GlobalSchedule(const StatusWord& agent_sw,
 }
 
 void CafScheduler::ReallocateCores() {
+  // if no new vm joined or reallocation_interval not reached skip reallocating
+  if (MonotonicNow() - last_reallocation_time_ < reallocation_interval_ &&
+      !new_vm_joined_) {
+    return;
+  }
+  last_reallocation_time_ = MonotonicNow();
   auto pcpu_list = cpus().ToVector();
   auto global_cpu_id = GetGlobalCPUId();
   // remove global cpu from the pcpu_list
@@ -426,7 +437,7 @@ void CafScheduler::ReallocateCores() {
                       total_runnable_vcpus);
       DLOG(INFO) << "VM: " << vm_id << " per_vm_quota: " << per_vm_quota;
       CHECK_LE(per_vm_quota, pcpu_list.size());
-      for (size_t j = 0; j < per_vm_quota;j++) {
+      for (size_t j = 0; j < per_vm_quota; j++) {
         cpu_state(pcpu_list.back())->vm_id = vm_id;
         pcpu_list.pop_back();
         // cpu_state(pcpu_list[i + j])->vm_id = vm_id;
@@ -513,11 +524,12 @@ found:
 
 std::unique_ptr<CafScheduler> SingleThreadCafScheduler(
     Enclave* enclave, CpuList cpulist, int32_t global_cpu,
-    absl::Duration preemption_time_slice) {
+    absl::Duration preemption_time_slice,
+    absl::Duration reallocation_interval) {
   auto allocator = std::make_shared<SingleThreadMallocTaskAllocator<CafTask>>();
   auto scheduler = std::make_unique<CafScheduler>(
       enclave, std::move(cpulist), std::move(allocator), global_cpu,
-      preemption_time_slice);
+      preemption_time_slice, reallocation_interval);
   return scheduler;
 }
 
