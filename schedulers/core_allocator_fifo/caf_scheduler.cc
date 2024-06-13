@@ -6,6 +6,8 @@
 
 #include "schedulers/core_allocator_fifo/caf_scheduler.h"
 
+#include <unistd.h>
+
 #include <memory>
 
 #include "absl/strings/str_format.h"
@@ -105,6 +107,19 @@ void CafScheduler::TaskNew(CafTask* task, const Message& msg) {
   task->vm_id = gtid.tgid();
   if (vm_run_queues_.find(task->vm_id) == vm_run_queues_.end()) {
     new_vm_joined_ = true;
+    // TODO: connect to shmem here
+    // 442 is syscall number to attach shmem
+    // shmem_addresses_[task->vm_id] is a pair of <hva, pfn>
+    if (vm_shmem_addresses_.find(task->vm_id) != vm_shmem_addresses_.end()) {
+      auto addr = vm_shmem_addresses_.at(task->vm_id);
+      DLOG(INFO) << absl::StrFormat(
+          "TaskNew: VM %d shmem addr found hva: %lx pfn: %lx", task->vm_id,
+          addr.first, addr.second);
+      syscall(442, addr.first, addr.second);
+    } else {
+      DLOG(INFO) << absl::StrFormat("TaskNew: VM %d shmem addr not found",
+                                    task->vm_id);
+    }
   }
   if (payload->runnable) {
     task->run_state = CafTask::RunState::kRunnable;
@@ -423,9 +438,16 @@ void CafScheduler::ReallocateCores() {
                   "sequentially.";
     size_t i = 0;
     for (const auto& [vm_id, rq] : vm_run_queues_) {
-      for (; i < RunqueueSize(vm_id); i++) {
+      size_t per_vm_quota = RunqueueSize(vm_id);
+      for (; i < per_vm_quota; i++) {
         CHECK(pcpu_list[i].id() != global_cpu_id);
         cpu_state(pcpu_list[i])->vm_id = vm_id;
+      }
+      // Write back the quota to shmem so that  guest kernel reads it
+      uint64_t hva = vm_shmem_addresses_.at(vm_id).first;
+      *(uint64_t*)(hva) = per_vm_quota;
+      if (new_vm_joined_) {
+        *(uint64_t*)(hva + 1) = 42;
       }
     }
   } else {
@@ -441,6 +463,12 @@ void CafScheduler::ReallocateCores() {
         cpu_state(pcpu_list.back())->vm_id = vm_id;
         pcpu_list.pop_back();
         // cpu_state(pcpu_list[i + j])->vm_id = vm_id;
+      }
+      // Write back the quota to shmem so that  guest kernel reads it
+      uint64_t hva = vm_shmem_addresses_.at(vm_id).first;
+      *(uint64_t*)(hva) = per_vm_quota;
+      if (new_vm_joined_) {
+        *(uint64_t*)(hva + 1) = 42;
       }
     }
   }

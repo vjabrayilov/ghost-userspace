@@ -10,6 +10,7 @@
 #include <boost/histogram.hpp>
 #include <map>
 #include <memory>
+#include <unordered_map>
 
 #include "absl/time/time.h"
 #include "lib/agent.h"
@@ -239,6 +240,8 @@ class CafScheduler : public BasicDispatchScheduler<CafTask> {
   bool new_vm_joined_ = false;
   const absl::Duration reallocation_interval_;
   absl::Time last_reallocation_time_ = absl::InfinitePast();
+  const std::unordered_map<pid_t, std::pair<uint64_t, uint64_t>>
+      vm_shmem_addresses_;
 };
 
 // Initializes the task allocator and the FIFO scheduler.
