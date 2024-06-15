@@ -477,6 +477,10 @@ void CafScheduler::ReallocateCores() {
         pcpu_list.pop_back();
         // cpu_state(pcpu_list[i + j])->vm_id = vm_id;
       }
+
+      if (per_vm_quota == 0) {
+        continue;
+      }
       // Write back the quota to shmem so that  guest kernel reads it
       CHECK_NE(per_vm_quota, 0);
 
