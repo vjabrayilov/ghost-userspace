@@ -119,14 +119,14 @@ void CafScheduler::TaskNew(CafTask* task, const Message& msg) {
       ret = syscall(442, addr.first, addr.second);
       if (ret == -1) {
         DLOG(WARNING) << absl::StrFormat(
-          "TaskNew: VM %d shmem attachment failed pfn: %lx hva: %lx", task->vm_id,
-          addr.first, addr.second);
+            "TaskNew: VM %d shmem attachment failed pfn: %lx hva: %lx",
+            task->vm_id, addr.first, addr.second);
       }
       *((uint64_t*)(addr.first)) = 2048;
       *((uint64_t*)(addr.first) + 1) = 42;
     } else {
       DLOG(WARNING) << absl::StrFormat("TaskNew: VM %d shmem addr not found",
-                                    task->vm_id);
+                                       task->vm_id);
     }
   }
   if (payload->runnable) {
@@ -436,13 +436,15 @@ void CafScheduler::ReallocateCores() {
   }
 
   if (total_runnable_vcpus == 0) {
-    // DLOG(INFO) << "No runnable vCPUs for any VMs. Skipping core reallocation.";
+    // DLOG(INFO) << "No runnable vCPUs for any VMs. Skipping core
+    // reallocation.";
     return;
   }
 
   if (total_runnable_vcpus < pcpu_count) {
     // assign sequentially
-    //DLOG(WARNING) << "More pCPUs available than the runnable vCPUs. Assigning "
+    // DLOG(WARNING) << "More pCPUs available than the runnable vCPUs. Assigning
+    // "
     //               "sequentially.";
     size_t i = 0;
     for (const auto& [vm_id, rq] : vm_run_queues_) {
@@ -452,12 +454,14 @@ void CafScheduler::ReallocateCores() {
         cpu_state(pcpu_list[i])->vm_id = vm_id;
       }
       // Write back the quota to shmem so that  guest kernel reads it
-      uint64_t hva = vm_shmem_addresses_.at(vm_id).first;
-      if (new_vm_joined_) {
-        *((uint64_t*)(hva) + 1) = 42;
-      }
-      *(uint64_t*)(hva) = per_vm_quota;
-      DLOG(WARNING) << "VM: " << vm_id << " per_vm_quota: " << per_vm_quota;
+      // CHECK_NE(per_vm_quota, 0);
+      //
+      // uint64_t hva = vm_shmem_addresses_.at(vm_id).first;
+      // *(uint64_t*)(hva) = per_vm_quota;
+      // if (new_vm_joined_) {
+      //   *((uint64_t*)(hva) + 1) = 42;
+      // }
+      // DLOG(WARNING) << "VM: " << vm_id << " per_vm_quota: " << per_vm_quota;
     }
   } else {
     DLOG(WARNING) << "Assigning cores proportional to the # of runnable vCPUs.";
@@ -474,11 +478,13 @@ void CafScheduler::ReallocateCores() {
         // cpu_state(pcpu_list[i + j])->vm_id = vm_id;
       }
       // Write back the quota to shmem so that  guest kernel reads it
+      CHECK_NE(per_vm_quota, 0);
+
       uint64_t hva = vm_shmem_addresses_.at(vm_id).first;
+      *(uint64_t*)(hva) = per_vm_quota;
       if (new_vm_joined_) {
         *((uint64_t*)(hva) + 1) = 42;
       }
-      *(uint64_t*)(hva) = per_vm_quota;
     }
   }
 }
