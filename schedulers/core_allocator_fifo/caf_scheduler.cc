@@ -119,7 +119,7 @@ void CafScheduler::TaskNew(CafTask* task, const Message& msg) {
       ret = syscall(442, addr.first, addr.second);
       if (ret == -1) {
         DLOG(WARNING) << absl::StrFormat(
-          "TaskNew: VM %d shmem attachment failed", task->vm_id,
+          "TaskNew: VM %d shmem attachment failed pfn: %lx hva: %lx", task->vm_id,
           addr.first, addr.second);
       }
       *((uint64_t*)(addr.first)) = 2048;
@@ -442,7 +442,7 @@ void CafScheduler::ReallocateCores() {
 
   if (total_runnable_vcpus < pcpu_count) {
     // assign sequentially
-    DLOG(WARNING) << "More pCPUs available than the runnable vCPUs. Assigning "
+    //DLOG(WARNING) << "More pCPUs available than the runnable vCPUs. Assigning "
     //               "sequentially.";
     size_t i = 0;
     for (const auto& [vm_id, rq] : vm_run_queues_) {
