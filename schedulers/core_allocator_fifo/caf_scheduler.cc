@@ -412,10 +412,17 @@ void CafScheduler::GlobalSchedule(const StatusWord& agent_sw,
 
 void CafScheduler::ReallocateCores() {
   // if no new vm joined or reallocation_interval not reached skip reallocating
-  if (MonotonicNow() - last_reallocation_time_ < reallocation_interval_ &&
-      !new_vm_joined_) {
-    return;
+  //
+  if (MonotonicNow() - last_reallocation_time_ < reallocation_interval_) {
+    if (!new_vm_joined_) {
+      return;
+    }
   }
+  if (new_vm_joined_) {
+    fprintf(stderr, "new_vm_joined_ reallocation w/o respecting interval\n");
+    new_vm_joined_ = !new_vm_joined_;
+  }
+  fprintf(stderr, "--\n");
   last_reallocation_time_ = MonotonicNow();
   auto pcpu_list = cpus().ToVector();
   auto global_cpu_id = GetGlobalCPUId();
@@ -438,6 +445,8 @@ void CafScheduler::ReallocateCores() {
   if (total_runnable_vcpus == 0) {
     // DLOG(INFO) << "No runnable vCPUs for any VMs. Skipping core
     // reallocation.";
+    // fprintf(stderr,"No runnable vCPUs for any VMs. Skipping core
+    // reallocation.\n");
     return;
   }
 
@@ -446,6 +455,8 @@ void CafScheduler::ReallocateCores() {
     // DLOG(WARNING) << "More pCPUs available than the runnable vCPUs. Assigning
     // "
     //               "sequentially.";
+    fprintf(stderr, "total_runnable_vcpus: %ld pcpu_count: %ld\n",
+            total_runnable_vcpus, pcpu_count);
     size_t i = 0;
     for (const auto& [vm_id, rq] : vm_run_queues_) {
       size_t per_vm_quota = RunqueueSize(vm_id);
@@ -453,14 +464,19 @@ void CafScheduler::ReallocateCores() {
         CHECK(pcpu_list[i].id() != global_cpu_id);
         cpu_state(pcpu_list[i])->vm_id = vm_id;
       }
+
+      per_vm_quota = pcpu_count / vm_run_queues_.size();
+      fprintf(stderr, "t<p vm_id: %d, per_vm: %ld, rq: %ld, total_pcpu: %ld\n",
+              vm_id, per_vm_quota, RunqueueSize(vm_id), pcpu_count);
+
+      CHECK_NE(per_vm_quota, 0);
+      uint64_t hva = vm_shmem_addresses_.at(vm_id).first;
+      *(uint64_t*)(hva) = per_vm_quota;
+      if (new_vm_joined_) {
+        *((uint64_t*)(hva) + 1) = 42;
+      }
       // Write back the quota to shmem so that  guest kernel reads it
-      // CHECK_NE(per_vm_quota, 0);
-      //
-      // uint64_t hva = vm_shmem_addresses_.at(vm_id).first;
-      // *(uint64_t*)(hva) = per_vm_quota;
-      // if (new_vm_joined_) {
-      //   *((uint64_t*)(hva) + 1) = 42;
-      // }
+
       // DLOG(WARNING) << "VM: " << vm_id << " per_vm_quota: " << per_vm_quota;
     }
   } else {
@@ -471,6 +487,8 @@ void CafScheduler::ReallocateCores() {
           std::lround(pcpu_count * static_cast<double>(RunqueueSize(vm_id)) /
                       total_runnable_vcpus);
       DLOG(WARNING) << "VM: " << vm_id << " per_vm_quota: " << per_vm_quota;
+      fprintf(stderr, "%d,per_vm: %ld, rq: %ld, total_pcpu: %ld\n", vm_id,
+              per_vm_quota, RunqueueSize(vm_id), pcpu_count);
       CHECK_LE(per_vm_quota, pcpu_list.size());
       for (size_t j = 0; j < per_vm_quota; j++) {
         cpu_state(pcpu_list.back())->vm_id = vm_id;

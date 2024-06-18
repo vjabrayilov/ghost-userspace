@@ -241,8 +241,8 @@ class CafScheduler : public BasicDispatchScheduler<CafTask> {
   const absl::Duration reallocation_interval_;
   absl::Time last_reallocation_time_ = absl::InfinitePast();
   const std::unordered_map<pid_t, std::pair<uint64_t, uint64_t>>
-      vm_shmem_addresses_{{9600, {0x7fdc1bc72580, 0x1a40672}},
-                          {39251, {0x7f6e4bc72580, 0x171ce72}}};
+      vm_shmem_addresses_{{95290, {0x7f556fc72580, 0x1cbd072}},
+                          {96185, {0x7f90e8e72580, 0x167e472}}};
 };
 
 // Initializes the task allocator and the FIFO scheduler.
