@@ -432,13 +432,13 @@ void CafScheduler::ReallocateCores(bool forcefully) {
   // each vm get number of cores proportional to their queue size
   size_t total_runnable_vcpus = 0;
   for (const auto& [vm_id, rq] : vm_run_queues_) {
-    total_runnable_vcpus += RunqueueSize(vm_id);
+    total_runnable_vcpus += RunqueueSize(vm_id)+vm_running_vcpus_[vm_id];
   }
 
   if (total_runnable_vcpus < pcpu_count) {
     size_t i = 0;
     for (const auto& [vm_id, rq] : vm_run_queues_) {
-      size_t per_vm_quota = RunqueueSize(vm_id);
+      size_t per_vm_quota = RunqueueSize(vm_id) + vm_running_vcpus_[vm_id];
       for (; i < per_vm_quota; i++) {
         CHECK(pcpu_list[i].id() != global_cpu_id);
         cpu_state(pcpu_list[i])->vm_id = vm_id;
@@ -451,7 +451,7 @@ void CafScheduler::ReallocateCores(bool forcefully) {
     DLOG(WARNING) << "Assigning cores proportional to the # of runnable vCPUs.";
     for (const auto& [vm_id, rq] : vm_run_queues_) {
       auto per_vm_quota =
-          std::lround(pcpu_count * static_cast<double>(RunqueueSize(vm_id)) /
+          std::lround(pcpu_count * static_cast<double>(RunqueueSize(vm_id)+vm_running_vcpus_[vm_id]) /
                       total_runnable_vcpus);
       CHECK_LE(per_vm_quota, pcpu_list.size());
       for (size_t j = 0; j < per_vm_quota; j++) {
