@@ -162,7 +162,7 @@ class CafScheduler : public BasicDispatchScheduler<CafTask> {
     global_cpu_.store(cpu.id(), std::memory_order_release);
   }
 
-  void ReallocateCores();
+  void ReallocateCores(bool forcefully);
 
   // When a different scheduling class (e.g., CFS) has a task to run on the
   // global agent's CPU, the global agent calls this function to try to pick a
@@ -237,12 +237,10 @@ class CafScheduler : public BasicDispatchScheduler<CafTask> {
   absl::Duration schedule_durations_;
   uint64_t iterations_ = 0;
   absl::Time last_blocked = absl::InfinitePast();
-  bool new_vm_joined_ = false;
+  std::vector<pid_t> new_vm_joined_ = {};
+  std::unordered_map<pid_t, int64_t> vm_running_vcpus_;
   const absl::Duration reallocation_interval_;
   absl::Time last_reallocation_time_ = absl::InfinitePast();
-  const std::unordered_map<pid_t, std::pair<uint64_t, uint64_t>>
-      vm_shmem_addresses_{{95290, {0x7f556fc72580, 0x1cbd072}},
-                          {96185, {0x7f90e8e72580, 0x167e472}}};
 };
 
 // Initializes the task allocator and the FIFO scheduler.

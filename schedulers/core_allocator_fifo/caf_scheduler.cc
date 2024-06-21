@@ -107,27 +107,7 @@ void CafScheduler::TaskNew(CafTask* task, const Message& msg) {
   const Gtid gtid(payload->gtid);
   task->vm_id = gtid.tgid();
   if (vm_run_queues_.find(task->vm_id) == vm_run_queues_.end()) {
-    new_vm_joined_ = true;
-    // TODO: connect to shmem here
-    // 442 is syscall number to attach shmem
-    // shmem_addresses_[task->vm_id] is a pair of <hva, pfn>
-    if (vm_shmem_addresses_.find(task->vm_id) != vm_shmem_addresses_.end()) {
-      auto addr = vm_shmem_addresses_.at(task->vm_id);
-      DLOG(INFO) << absl::StrFormat(
-          "TaskNew: VM %d shmem addr found hva: %lx pfn: %lx", task->vm_id,
-          addr.first, addr.second);
-      ret = syscall(442, addr.first, addr.second);
-      if (ret == -1) {
-        DLOG(WARNING) << absl::StrFormat(
-            "TaskNew: VM %d shmem attachment failed pfn: %lx hva: %lx",
-            task->vm_id, addr.first, addr.second);
-      }
-      *((uint64_t*)(addr.first)) = 2048;
-      *((uint64_t*)(addr.first) + 1) = 42;
-    } else {
-      DLOG(WARNING) << absl::StrFormat("TaskNew: VM %d shmem addr not found",
-                                       task->vm_id);
-    }
+    new_vm_joined_.push_back(task->vm_id);
   }
   if (payload->runnable) {
     task->run_state = CafTask::RunState::kRunnable;
@@ -146,6 +126,10 @@ void CafScheduler::TaskRunnable(CafTask* task, const Message& msg) {
   task->run_state = CafTask::RunState::kRunnable;
   task->prio_boost = !payload->deferrable;
   Enqueue(task);
+  if (!new_vm_joined_.empty()) {
+    ReallocateCores(true);
+    new_vm_joined_.pop_back();
+  }
 }
 
 void CafScheduler::TaskDeparted(CafTask* task, const Message& msg) {
@@ -184,6 +168,10 @@ void CafScheduler::TaskBlocked(CafTask* task, const Message& msg) {
   // auto duration = absl::ToInt64Microseconds(end - start);
   if (task->oncpu()) {
     CpuState* cs = cpu_state_of(task);
+
+    vm_running_vcpus_[task->vm_id]--;
+    CHECK_GE(vm_running_vcpus_[task->vm_id], 0);
+
     CHECK_EQ(cs->current, task);
     cs->current = nullptr;
   } else {
@@ -204,6 +192,8 @@ void CafScheduler::TaskPreempted(CafTask* task, const Message& msg) {
     cs->current = nullptr;
     task->run_state = CafTask::RunState::kRunnable;
     Enqueue(task);
+    vm_running_vcpus_[task->vm_id]--;
+    CHECK_GE(vm_running_vcpus_[task->vm_id], 0) << " vm_id: " << task->vm_id;
   } else {
     CHECK(task->queued());
   }
@@ -213,6 +203,8 @@ void CafScheduler::TaskYield(CafTask* task, const Message& msg) {
   DLOG(INFO) << absl::StrFormat("TaskYield: %s", task->gtid.describe());
   if (task->oncpu()) {
     CpuState* cs = cpu_state_of(task);
+    vm_running_vcpus_[task->vm_id]--;
+    CHECK_GE(vm_running_vcpus_[task->vm_id], 0);
     CHECK_EQ(cs->current, task);
     cs->current = nullptr;
     Yield(task);
@@ -351,6 +343,8 @@ void CafScheduler::GlobalSchedule(const StatusWord& agent_sw,
     if (cs->current) {
       cs->current->run_state = CafTask::RunState::kRunnable;
       Enqueue(cs->current);
+      vm_running_vcpus_[cs->current->vm_id]--;
+      CHECK_GE(vm_running_vcpus_[cs->current->vm_id], 0);
     }
     cs->current = next;
 
@@ -359,6 +353,9 @@ void CafScheduler::GlobalSchedule(const StatusWord& agent_sw,
 
     CHECK(cs->vm_id == next->vm_id);
     CHECK(cs->vm_id != GetGlobalCPUId());
+
+    vm_running_vcpus_[cs->current->vm_id]++;
+    CHECK_LE(vm_running_vcpus_[cs->current->vm_id], 4);
 
     RunRequest* req = enclave()->GetRunRequest(next_cpu);
     req->Open({.target = next->gtid,
@@ -393,6 +390,8 @@ void CafScheduler::GlobalSchedule(const StatusWord& agent_sw,
       // The transaction commit failed so push `next` to the front of runqueue.
       cs->current->prio_boost = true;
       Enqueue(cs->current);
+      vm_running_vcpus_[cs->current->vm_id]--;
+      CHECK_GE(vm_running_vcpus_[cs->current->vm_id], 0);
       // The task failed to run on `next_cpu`, so clear out `cs->current`.
       cs->current = nullptr;
     }
@@ -410,19 +409,14 @@ void CafScheduler::GlobalSchedule(const StatusWord& agent_sw,
   }
 }
 
-void CafScheduler::ReallocateCores() {
+void CafScheduler::ReallocateCores(bool forcefully) {
   // if no new vm joined or reallocation_interval not reached skip reallocating
-  //
   if (MonotonicNow() - last_reallocation_time_ < reallocation_interval_) {
-    if (!new_vm_joined_) {
+    if (!forcefully) {
       return;
     }
   }
-  if (new_vm_joined_) {
-    fprintf(stderr, "new_vm_joined_ reallocation w/o respecting interval\n");
-    new_vm_joined_ = !new_vm_joined_;
-  }
-  fprintf(stderr, "--\n");
+
   last_reallocation_time_ = MonotonicNow();
   auto pcpu_list = cpus().ToVector();
   auto global_cpu_id = GetGlobalCPUId();
@@ -436,27 +430,12 @@ void CafScheduler::ReallocateCores() {
 
   // Implemenet core reallocation
   // each vm get number of cores proportional to their queue size
-
   size_t total_runnable_vcpus = 0;
   for (const auto& [vm_id, rq] : vm_run_queues_) {
     total_runnable_vcpus += RunqueueSize(vm_id);
   }
 
-  if (total_runnable_vcpus == 0) {
-    // DLOG(INFO) << "No runnable vCPUs for any VMs. Skipping core
-    // reallocation.";
-    // fprintf(stderr,"No runnable vCPUs for any VMs. Skipping core
-    // reallocation.\n");
-    return;
-  }
-
   if (total_runnable_vcpus < pcpu_count) {
-    // assign sequentially
-    // DLOG(WARNING) << "More pCPUs available than the runnable vCPUs. Assigning
-    // "
-    //               "sequentially.";
-    fprintf(stderr, "total_runnable_vcpus: %ld pcpu_count: %ld\n",
-            total_runnable_vcpus, pcpu_count);
     size_t i = 0;
     for (const auto& [vm_id, rq] : vm_run_queues_) {
       size_t per_vm_quota = RunqueueSize(vm_id);
@@ -465,30 +444,15 @@ void CafScheduler::ReallocateCores() {
         cpu_state(pcpu_list[i])->vm_id = vm_id;
       }
 
-      per_vm_quota = pcpu_count / vm_run_queues_.size();
-      fprintf(stderr, "t<p vm_id: %d, per_vm: %ld, rq: %ld, total_pcpu: %ld\n",
-              vm_id, per_vm_quota, RunqueueSize(vm_id), pcpu_count);
-
+      per_vm_quota = pcpu_count;  /// vm_run_queues_.size();
       CHECK_NE(per_vm_quota, 0);
-      uint64_t hva = vm_shmem_addresses_.at(vm_id).first;
-      *(uint64_t*)(hva) = per_vm_quota;
-      if (new_vm_joined_) {
-        *((uint64_t*)(hva) + 1) = 42;
-      }
-      // Write back the quota to shmem so that  guest kernel reads it
-
-      // DLOG(WARNING) << "VM: " << vm_id << " per_vm_quota: " << per_vm_quota;
     }
   } else {
     DLOG(WARNING) << "Assigning cores proportional to the # of runnable vCPUs.";
-    // size_t i = 0;
     for (const auto& [vm_id, rq] : vm_run_queues_) {
       auto per_vm_quota =
           std::lround(pcpu_count * static_cast<double>(RunqueueSize(vm_id)) /
                       total_runnable_vcpus);
-      DLOG(WARNING) << "VM: " << vm_id << " per_vm_quota: " << per_vm_quota;
-      fprintf(stderr, "%d,per_vm: %ld, rq: %ld, total_pcpu: %ld\n", vm_id,
-              per_vm_quota, RunqueueSize(vm_id), pcpu_count);
       CHECK_LE(per_vm_quota, pcpu_list.size());
       for (size_t j = 0; j < per_vm_quota; j++) {
         cpu_state(pcpu_list.back())->vm_id = vm_id;
@@ -499,14 +463,7 @@ void CafScheduler::ReallocateCores() {
       if (per_vm_quota == 0) {
         continue;
       }
-      // Write back the quota to shmem so that  guest kernel reads it
       CHECK_NE(per_vm_quota, 0);
-
-      uint64_t hva = vm_shmem_addresses_.at(vm_id).first;
-      *(uint64_t*)(hva) = per_vm_quota;
-      if (new_vm_joined_) {
-        *((uint64_t*)(hva) + 1) = 42;
-      }
     }
   }
 }
@@ -631,7 +588,7 @@ void CafAgent::AgentThread() {
         global_channel.Consume(msg);
       }
 
-      global_scheduler_->ReallocateCores();
+      global_scheduler_->ReallocateCores(false);
 
       global_scheduler_->GlobalSchedule(status_word(), agent_barrier);
 
