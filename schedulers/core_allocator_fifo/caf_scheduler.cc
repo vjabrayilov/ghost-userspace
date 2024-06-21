@@ -20,13 +20,14 @@ void CafScheduler::CpuTimerExpired(const Message& msg) { CHECK(0); }
 
 CafScheduler::CafScheduler(Enclave* enclave, CpuList cpulist,
                            std::shared_ptr<TaskAllocator<CafTask>> allocator,
-                           int32_t global_cpu,
+                           int32_t global_cpu, pid_t lc_vm_id,
                            absl::Duration preemption_time_slice,
                            absl::Duration reallocation_interval)
     : BasicDispatchScheduler(enclave, std::move(cpulist), std::move(allocator)),
       global_cpu_(global_cpu),
       global_channel_(GHOST_MAX_QUEUE_ELEMS, /*node=*/0),
       preemption_time_slice_(preemption_time_slice),
+      lc_vm_id_(lc_vm_id),
       reallocation_interval_(reallocation_interval) {
   if (!cpus().IsSet(global_cpu_)) {
     Cpu c = cpus().Front();
@@ -96,7 +97,6 @@ CafScheduler::CpuState* CafScheduler::cpu_state_of(const CafTask* task) {
 }
 
 void CafScheduler::TaskNew(CafTask* task, const Message& msg) {
-  int ret;
   const ghost_msg_payload_task_new* payload =
       static_cast<const ghost_msg_payload_task_new*>(msg.payload());
   DLOG(INFO) << absl::StrFormat("TaskNew: %s", task->gtid.describe());
@@ -432,7 +432,7 @@ void CafScheduler::ReallocateCores(bool forcefully) {
   // each vm get number of cores proportional to their queue size
   size_t total_runnable_vcpus = 0;
   for (const auto& [vm_id, rq] : vm_run_queues_) {
-    total_runnable_vcpus += RunqueueSize(vm_id)+vm_running_vcpus_[vm_id];
+    total_runnable_vcpus += RunqueueSize(vm_id) + vm_running_vcpus_[vm_id];
   }
 
   if (total_runnable_vcpus < pcpu_count) {
@@ -443,16 +443,28 @@ void CafScheduler::ReallocateCores(bool forcefully) {
         CHECK(pcpu_list[i].id() != global_cpu_id);
         cpu_state(pcpu_list[i])->vm_id = vm_id;
       }
-
-      per_vm_quota = pcpu_count;  /// vm_run_queues_.size();
-      CHECK_NE(per_vm_quota, 0);
     }
   } else {
     DLOG(WARNING) << "Assigning cores proportional to the # of runnable vCPUs.";
+    // assign lc first if that is runnable continue with batch
+    auto per_vm_quota = RunqueueSize(lc_vm_id_) + vm_running_vcpus_[lc_vm_id_];
+    size_t i = 0;
+    for (; i < per_vm_quota; i++) {
+      CHECK(pcpu_list[i].id() != global_cpu_id);
+      cpu_state(pcpu_list[i])->vm_id = lc_vm_id_;
+      pcpu_list.erase(pcpu_list.begin());
+    }
+    // now i is at the end of lc_vm_id_ cores
+    pcpu_count -= per_vm_quota;
+    total_runnable_vcpus -=
+        (RunqueueSize(lc_vm_id_) + vm_running_vcpus_[lc_vm_id_]);
+
     for (const auto& [vm_id, rq] : vm_run_queues_) {
-      auto per_vm_quota =
-          std::lround(pcpu_count * static_cast<double>(RunqueueSize(vm_id)+vm_running_vcpus_[vm_id]) /
-                      total_runnable_vcpus);
+      if (vm_id == lc_vm_id_) continue;
+      per_vm_quota = std::lround(
+          pcpu_count *
+          static_cast<double>(RunqueueSize(vm_id) + vm_running_vcpus_[vm_id]) /
+          total_runnable_vcpus);
       CHECK_LE(per_vm_quota, pcpu_list.size());
       for (size_t j = 0; j < per_vm_quota; j++) {
         cpu_state(pcpu_list.back())->vm_id = vm_id;
@@ -545,12 +557,12 @@ found:
 }
 
 std::unique_ptr<CafScheduler> SingleThreadCafScheduler(
-    Enclave* enclave, CpuList cpulist, int32_t global_cpu,
+    Enclave* enclave, CpuList cpulist, int32_t global_cpu, pid_t lc_vm_id,
     absl::Duration preemption_time_slice,
     absl::Duration reallocation_interval) {
   auto allocator = std::make_shared<SingleThreadMallocTaskAllocator<CafTask>>();
   auto scheduler = std::make_unique<CafScheduler>(
-      enclave, std::move(cpulist), std::move(allocator), global_cpu,
+      enclave, std::move(cpulist), std::move(allocator), global_cpu, lc_vm_id,
       preemption_time_slice, reallocation_interval);
   return scheduler;
 }

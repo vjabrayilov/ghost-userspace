@@ -28,6 +28,8 @@ ABSL_FLAG(
     absl::Duration, reallocation_interval, absl::Microseconds(100),
     "Cores are reallocated each reallocation interval (default = 100 us)");
 
+ABSL_FLAG(pid_t, lc_vm_id, -1, "The VM ID of LC VM.");
+
 namespace ghost {
 
 void ParseCafConfig(CafConfig* config) {
@@ -51,6 +53,7 @@ void ParseCafConfig(CafConfig* config) {
   config->global_cpu_ = topology->cpu(globalcpu);
   config->preemption_time_slice_ = absl::GetFlag(FLAGS_preemption_time_slice);
   config->reallocation_interval_ = absl::GetFlag(FLAGS_reallocation_interval);
+  config->lc_vm_id_ = absl::GetFlag(FLAGS_lc_vm_id);
 }
 
 }  // namespace ghost

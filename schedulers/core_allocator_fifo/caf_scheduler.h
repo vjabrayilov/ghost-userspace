@@ -123,7 +123,8 @@ class CafScheduler : public BasicDispatchScheduler<CafTask> {
  public:
   CafScheduler(Enclave* enclave, CpuList cpulist,
                std::shared_ptr<TaskAllocator<CafTask>> allocator,
-               int32_t global_cpu, absl::Duration preemption_time_slice,
+               int32_t global_cpu, pid_t lc_vm_id,
+               absl::Duration preemption_time_slice,
                absl::Duration reallocation_interval);
   ~CafScheduler();
 
@@ -239,13 +240,14 @@ class CafScheduler : public BasicDispatchScheduler<CafTask> {
   absl::Time last_blocked = absl::InfinitePast();
   std::vector<pid_t> new_vm_joined_ = {};
   std::unordered_map<pid_t, int64_t> vm_running_vcpus_;
+  pid_t lc_vm_id_;
   const absl::Duration reallocation_interval_;
   absl::Time last_reallocation_time_ = absl::InfinitePast();
 };
 
 // Initializes the task allocator and the FIFO scheduler.
 std::unique_ptr<CafScheduler> SingleThreadCafScheduler(
-    Enclave* enclave, CpuList cpulist, int32_t global_cpu,
+    Enclave* enclave, CpuList cpulist, int32_t global_cpu, pid_t lc_vm_id,
     absl::Duration preemption_time_slice, absl::Duration reallocation_interval);
 
 // Operates as the Global or Satellite agent depending on input from the
@@ -265,15 +267,17 @@ class CafAgent : public LocalAgent {
 class CafConfig : public AgentConfig {
  public:
   CafConfig() {}
-  CafConfig(Topology* topology, CpuList cpulist, Cpu global_cpu,
+  CafConfig(Topology* topology, CpuList cpulist, Cpu global_cpu, pid_t lc_vm_id,
             absl::Duration preemption_time_slice,
             absl::Duration reallocation_interval)
       : AgentConfig(topology, std::move(cpulist)),
         global_cpu_(global_cpu),
+        lc_vm_id_(lc_vm_id),
         preemption_time_slice_(preemption_time_slice),
         reallocation_interval_(reallocation_interval) {}
 
   Cpu global_cpu_{Cpu::UninitializedType::kUninitialized};
+  pid_t lc_vm_id_{-1};
   absl::Duration preemption_time_slice_ = absl::Microseconds(50);
   absl::Duration reallocation_interval_ = absl::Microseconds(100);
 };
@@ -286,7 +290,8 @@ class FullCafAgent : public FullAgent<EnclaveType> {
   explicit FullCafAgent(CafConfig config) : FullAgent<EnclaveType>(config) {
     global_scheduler_ = SingleThreadCafScheduler(
         &this->enclave_, *this->enclave_.cpus(), config.global_cpu_.id(),
-        config.preemption_time_slice_, config.reallocation_interval_);
+        config.lc_vm_id_, config.preemption_time_slice_,
+        config.reallocation_interval_);
     this->StartAgentTasks();
     this->enclave_.Ready();
   }
