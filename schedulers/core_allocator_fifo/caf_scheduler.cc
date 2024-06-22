@@ -438,9 +438,26 @@ void CafScheduler::ReallocateCores(bool forcefully) {
     size_t i = 0;
     for (const auto& [vm_id, rq] : vm_run_queues_) {
       size_t per_vm_quota = RunqueueSize(vm_id) + vm_running_vcpus_[vm_id];
-      for (; i < per_vm_quota; i++) {
-        CHECK(pcpu_list[i].id() != global_cpu_id);
-        cpu_state(pcpu_list[i])->vm_id = vm_id;
+      for (size_t j = 0; j < per_vm_quota; j++) {
+        CHECK(pcpu_list[i + j].id() != global_cpu_id);
+        cpu_state(pcpu_list[i + j])->vm_id = vm_id;
+      }
+      i += per_vm_quota;
+    }
+    if (i < pcpu_count) {
+      size_t count = pcpu_count - i;
+      // TODO: hardcoded for now, if 1 vm give all to it, if 2 vm divide evenly
+      if (vm_run_queues_.size() == 1) {
+        for (size_t j = 0; j < count; j++) {
+          cpu_state(pcpu_list[i + j])->vm_id = vm_run_queues_.begin()->first;
+        }
+      } else if (vm_run_queues_.size() == 2) {
+        for (size_t j = 0; j < count / 2; j++) {
+          cpu_state(pcpu_list[i + j])->vm_id = vm_run_queues_.begin()->first;
+        }
+        for (size_t j = count / 2; j < count; j++) {
+          cpu_state(pcpu_list[i + j])->vm_id = vm_run_queues_.rbegin()->first;
+        }
       }
     }
   } else {
