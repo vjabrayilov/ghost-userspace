@@ -415,7 +415,7 @@ void CafScheduler::ReallocateCores(bool forcefully) {
       return;
     }
   }
-
+auto start = MonotonicNow();
   last_reallocation_time_ = MonotonicNow();
   auto pcpu_list = cpus().ToVector();
   auto global_cpu_id = GetGlobalCPUId();
@@ -432,30 +432,49 @@ void CafScheduler::ReallocateCores(bool forcefully) {
   size_t total_runnable_vcpus = 0;
   for (const auto& [vm_id, rq] : vm_run_queues_) {
     total_runnable_vcpus += RunqueueSize(vm_id) + vm_running_vcpus_[vm_id];
+    // fprintf(stderr,"vm_id: %d, runnable_vcpus: %ld, running_vcpus: %ld\n",
+    //         vm_id, RunqueueSize(vm_id), vm_running_vcpus_[vm_id]);
   }
 
   if (total_runnable_vcpus < pcpu_count) {
+    // fprintf(stderr, "total_runnable_vcpus: %ld < pcpu_count: %ld\n",
+    // total_runnable_vcpus, pcpu_count);
     size_t i = 0;
     for (const auto& [vm_id, rq] : vm_run_queues_) {
       size_t per_vm_quota = RunqueueSize(vm_id) + vm_running_vcpus_[vm_id];
+      // fprintf(stderr, "vm_id: %d, per_vm_quota: %ld\n", vm_id, per_vm_quota);
       for (size_t j = 0; j < per_vm_quota; j++) {
         CHECK(pcpu_list[i + j].id() != global_cpu_id);
         cpu_state(pcpu_list[i + j])->vm_id = vm_id;
+        // fprintf(stderr, "vm_id: %d, cpu_id: %d\n", vm_id,
+        //         pcpu_list[i + j].id());
       }
       i += per_vm_quota;
     }
     if (i < pcpu_count) {
+      // fprintf(stderr, "there are some left-over cpus\n");
       size_t count = pcpu_count - i;
       // TODO: hardcoded for now, if 1 vm give all to it, if 2 vm divide evenly
       if (vm_run_queues_.size() == 1) {
+        // fprintf(stderr, "single vm in the system: %d\n",
+        //         vm_run_queues_.begin()->first);
         for (size_t j = 0; j < count; j++) {
+          // fprintf(stderr, "vm_id: %d, cpu_id: %d\n",
+          //         vm_run_queues_.begin()->first, pcpu_list[i + j].id());
           cpu_state(pcpu_list[i + j])->vm_id = vm_run_queues_.begin()->first;
         }
       } else if (vm_run_queues_.size() == 2) {
+        // fprintf(stderr, "two vm in the system: %d, %d\n",
+        //         vm_run_queues_.begin()->first,
+        //         vm_run_queues_.rbegin()->first);
         for (size_t j = 0; j < count / 2; j++) {
+          // fprintf(stderr, "vm_id: %d, cpu_id: %d\n",
+          //         vm_run_queues_.begin()->first, pcpu_list[i + j].id());
           cpu_state(pcpu_list[i + j])->vm_id = vm_run_queues_.begin()->first;
         }
         for (size_t j = count / 2; j < count; j++) {
+          // fprintf(stderr, "vm_id: %d, cpu_id: %d\n",
+          //         vm_run_queues_.rbegin()->first, pcpu_list[i + j].id());
           cpu_state(pcpu_list[i + j])->vm_id = vm_run_queues_.rbegin()->first;
         }
       }
@@ -480,10 +499,24 @@ void CafScheduler::ReallocateCores(bool forcefully) {
       CHECK_NE(per_vm_quota, 0);
     }
   }
+
+  pcpu_list = cpus().ToVector();
+  global_cpu_id = GetGlobalCPUId();
+  // remove global cpu from the pcpu_list
+  pcpu_list.erase(std::remove_if(pcpu_list.begin(), pcpu_list.end(),
+                                 [global_cpu_id](const Cpu& cpu) {
+                                   return cpu.id() == global_cpu_id;
+                                 }),
+                  pcpu_list.end());
+    fprintf(stderr,"T: %s reallocation took: %ld\n",absl::FormatTime(MonotonicNow()).c_str(), absl::ToInt64Nanoseconds(MonotonicNow() - start));
+  for (auto cpu : pcpu_list) {
+    fprintf(stderr, "cpu_id: %d, vm_id: %d\n", cpu.id(), cpu_state(cpu)->vm_id);
+  }
 }
 
 bool CafScheduler::PickNextGlobalCPU(BarrierToken agent_barrier,
                                      const Cpu& this_cpu) {
+  fprintf(stderr, "global cpu migrating\n");
   Cpu target(Cpu::UninitializedType::kUninitialized);
   Cpu global_cpu = topology()->cpu(GetGlobalCPUId());
   int numa_node = global_cpu.numa_node();
@@ -570,6 +603,9 @@ std::unique_ptr<CafScheduler> SingleThreadCafScheduler(
 }
 
 void CafAgent::AgentThread() {
+  GhostHelper()->SchedSetAffinity(Gtid::Current(),
+                                  MachineTopology()->ToCpuList(std::vector<int>{
+                                      global_scheduler_->GetGlobalCPUId()}));
   Channel& global_channel = global_scheduler_->GetDefaultChannel();
   gtid().assign_name("Agent:" + std::to_string(cpu().id()));
   if (verbose() > 1) {
@@ -591,10 +627,10 @@ void CafAgent::AgentThread() {
       }
       req->LocalYield(agent_barrier, /*flags=*/0);
     } else {
-      if (boosted_priority() &&
-          global_scheduler_->PickNextGlobalCPU(agent_barrier, cpu())) {
-        continue;
-      }
+      // if (boosted_priority() &&
+      //     global_scheduler_->PickNextGlobalCPU(agent_barrier, cpu())) {
+      //   continue;
+      // }
 
       Message msg;
       while (!(msg = global_channel.Peek()).empty()) {
